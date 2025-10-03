@@ -1,0 +1,24 @@
+
+1. Install pyenv-win: 
+If you haven't already, install pyenv-win by running the following command in PowerShell: 
+Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/pyenv-win/pyenv-win/master/pyenv-win/install-pyenv-win.ps1" -OutFile "./install-pyenv-win.ps1"; &"./install-pyenv-win.ps1"
+
+This script will clone the pyenv-win repository and set up the necessary environment variables. You might need to restart your terminal or computer for the changes to take effect. 
+2. Install Python versions using pyenv-win: 
+Use pyenv-win to install the desired Python versions. For example, to install Python 3.9.0: 
+pyenv install 3.9.0
+
+3. Install pyenv-virtualenv (or use venv): 
+While pyenv-virtualenv is a plugin for the original pyenv, pyenv-win has its own way of handling virtual environments, often relying on Python's built-in venv module. 
+
+• Using venv (recommended for modern Python versions): 
+
+For Python 3.3 and later, venv is built-in and generally preferred. You can create a virtual environment directly using the installed Python version: 
+    pyenv shell 3.9.0 # or whichever version you want to use
+    or
+    pyenv local 3.9.0 
+    
+    python -m venv my_project_env
+
+Then, activate it: 
+    .\my_project_env\Scripts\activate

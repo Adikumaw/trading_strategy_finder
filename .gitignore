@@ -1,0 +1,5 @@
+# Ignore environment folder
+strategy_finder_env/
+
+# Ignore bronze data files
+bronze_data/*.csv
