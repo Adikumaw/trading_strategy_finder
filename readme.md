@@ -80,7 +80,7 @@ Follow these steps in order to run the entire discovery and validation workflow.
 
 This script finds all possible profitable trades. It is multi-processed and can handle large files.
 
--   **Script:** `scripts/1_create_bronze_data.py`
+-   **Script:** `scripts/create_bronze_data.py`
 -   **Action:** Run the script from the terminal.
     ```bash
     cd scripts/
