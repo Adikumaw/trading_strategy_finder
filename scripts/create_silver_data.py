@@ -6,7 +6,7 @@ import numba
 import numpy as np
 from tqdm import tqdm
 
-# --- CONFIGURATION (Unchanged) ---
+# --- CONFIGURATION ---
 SMA_PERIODS = [20, 50, 100, 200]
 EMA_PERIODS = [8, 13, 21, 50]
 BBANDS_PERIOD, BBANDS_STD_DEV = 20, 2.0
@@ -16,56 +16,67 @@ ATR_PERIOD = 14
 ADX_PERIOD = 14
 SR_LOOKBACK = 200
 PAST_LOOKBACKS = [3, 5, 10, 20, 50]
+REMOVE_INITIAL_ROWS = 200  # Remove first N rows for accurate indicators
 
-# ### --- OPTIMIZATION 1: MEMORY REDUCTION HELPER --- ###
+# --- MEMORY OPTIMIZATION ---
 def downcast_dtypes(df):
-    """Reduces DataFrame memory usage by downcasting numeric columns."""
-    print("  Downcasting data types for memory optimization...")
-    start_mem = df.memory_usage().sum() / 1024**2
     for col in df.columns:
         if df[col].dtype == 'float64':
             df[col] = df[col].astype('float32')
         if df[col].dtype == 'int64':
             df[col] = df[col].astype('int32')
-    end_mem = df.memory_usage().sum() / 1024**2
-    print(f"  Memory usage reduced from {start_mem:.2f} MB to {end_mem:.2f} MB")
     return df
 
-# --- FEATURE CALCULATION FUNCTIONS (Now More Efficient) ---
-
+# --- INDICATORS ---
 def add_indicators(df):
-    print("  Calculating standard indicators...")
-    # This function is already efficient
-    for period in SMA_PERIODS: df[f"SMA_{period}"] = ta.trend.SMAIndicator(df["close"], window=period).sma_indicator()
-    for period in EMA_PERIODS: df[f"EMA_{period}"] = ta.trend.EMAIndicator(df["close"], window=period).ema_indicator()
-    bb = ta.volatility.BollingerBands(df["close"], window=BBANDS_PERIOD, window_dev=BBANDS_STD_DEV)
+    print("  Calculating indicators...")
+    for period in SMA_PERIODS:
+        print(f"    Calculating SMA_{period}...")
+        df[f"SMA_{period}"] = ta.trend.SMAIndicator(df["close"], period).sma_indicator()
+    for period in EMA_PERIODS:
+        print(f"    Calculating EMA_{period}...")
+        df[f"EMA_{period}"] = ta.trend.EMAIndicator(df["close"], period).ema_indicator()
+    
+    print("    Calculating Bollinger Bands...")
+    bb = ta.volatility.BollingerBands(df["close"], BBANDS_PERIOD, BBANDS_STD_DEV)
     df["BB_upper"], df["BB_lower"], df["BB_width"] = bb.bollinger_hband(), bb.bollinger_lband(), bb.bollinger_wband()
-    df[f"RSI_{RSI_PERIOD}"] = ta.momentum.RSIIndicator(df["close"], window=RSI_PERIOD).rsi()
-    macd = ta.trend.MACD(df["close"], window_slow=MACD_SLOW, window_fast=MACD_FAST, window_sign=MACD_SIGNAL)
+    
+    print("    Calculating RSI...")
+    df[f"RSI_{RSI_PERIOD}"] = ta.momentum.RSIIndicator(df["close"], RSI_PERIOD).rsi()
+    
+    print("    Calculating MACD histogram...")
+    macd = ta.trend.MACD(df["close"], MACD_SLOW, MACD_FAST, MACD_SIGNAL)
     df["MACD_hist"] = macd.macd_diff()
-    df[f"ATR_{ATR_PERIOD}"] = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=ATR_PERIOD).average_true_range()
-    df["ADX"] = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=ADX_PERIOD).adx()
+    
+    print("    Calculating ATR & ADX...")
+    df[f"ATR_{ATR_PERIOD}"] = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], ATR_PERIOD).average_true_range()
+    df["ADX"] = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], ADX_PERIOD).adx()
+    
+    print("    Calculating additional indicators (MOM, CCI, OBV)...")
+    df["MOM_10"] = ta.momentum.ROCIndicator(df["close"], window=10).roc()
+    df["CCI_20"] = ta.trend.CCIIndicator(df["high"], df["low"], df["close"], window=20).cci()
+    df["OBV"] = ta.volume.OnBalanceVolumeIndicator(df["close"], df.get("volume", pd.Series(1))).on_balance_volume()
+    
+    print("  ✅ Indicators calculation done.")
     return df
 
+# --- CANDLESTICKS ---
 def add_candlestick_patterns(df):
-    print("  Calculating all TA-Lib candlestick patterns...")
-    candle_names = talib.get_function_groups()["Pattern Recognition"]
-    # ### OPTIMIZATION 2: FIX FRAGMENTATION ###
-    # Create all pattern columns in a dictionary first
-    patterns_data = {}
-    for candle_func in candle_names:
-        patterns_data[candle_func] = getattr(talib, candle_func)(df["open"], df["high"], df["low"], df["close"])
-    
-    # Convert to a DataFrame and join in one operation
-    patterns_df = pd.DataFrame(patterns_data, index=df.index)
-    return pd.concat([df, patterns_df], axis=1)
+    print("  Calculating TA-Lib candlestick patterns...")
+    patterns = talib.get_function_groups()["Pattern Recognition"]
+    for p in tqdm(patterns, desc="    Candlestick patterns"):
+        df[p] = getattr(talib, p)(df["open"], df["high"], df["low"], df["close"])
+    print("  ✅ Candlestick patterns done.")
+    return df
 
+# --- SUPPORT / RESISTANCE ---
 @numba.njit
 def _calculate_s_r_numba(lows, highs, support_indices, support_values, resistance_indices, resistance_values, lookback):
     n = len(lows)
     supports, resistances = np.full(n, np.nan), np.full(n, np.nan)
     for i in range(n):
-        start_idx = max(0, i - lookback); current_low, current_high = lows[i], highs[i]
+        start_idx = max(0, i - lookback)
+        current_low, current_high = lows[i], highs[i]
         max_s, min_r = -np.inf, np.inf
         for j in range(len(support_indices)):
             s_idx, s_val = support_indices[j], support_values[j]
@@ -77,136 +88,142 @@ def _calculate_s_r_numba(lows, highs, support_indices, support_values, resistanc
         if min_r != np.inf: resistances[i] = min_r
     return supports, resistances
 
+# --- SUPPORT / RESISTANCE ---
 def add_support_resistance(df, lookback=SR_LOOKBACK):
-    print(f"  Calculating support & resistance...")
+    print("  Calculating support and resistance...")
     lows, highs = df['low'].values, df['high'].values
     is_support = (lows < np.roll(lows, 1)) & (lows < np.roll(lows, 2)) & (lows < np.roll(lows, -1)) & (lows < np.roll(lows, -2))
     is_resistance = (highs > np.roll(highs, 1)) & (highs > np.roll(highs, 2)) & (highs > np.roll(highs, -1)) & (highs > np.roll(highs, -2))
-    support_indices, resistance_indices = np.where(is_support)[0], np.where(is_resistance)[0]
-    support_values, resistance_values = lows[support_indices], highs[resistance_indices]
-    supports, resistances = _calculate_s_r_numba(lows, highs, support_indices, support_values, resistance_indices, resistance_values, lookback)
+    support_idx, resistance_idx = np.where(is_support)[0], np.where(is_resistance)[0]
+    supports, resistances = _calculate_s_r_numba(lows, highs, support_idx, lows[support_idx], resistance_idx, highs[resistance_idx], lookback)
     df['support'], df['resistance'] = supports, resistances
+    print("  ✅ Support & resistance done.")
     return df
 
-def get_market_session(timestamp):
-    hour = timestamp.hour
-    if (hour >= 7 and hour < 12): return 'London'
-    if (hour >= 12 and hour < 16): return 'London_NY_Overlap'
-    if (hour >= 16 and hour < 21): return 'New_York'
-    if (hour >= 21 or hour < 7): return 'Asian'
-    return 'Off-Session'
+# --- SESSIONS & TEMPORALS ---
+def get_market_session(ts):
+    h = ts.hour
+    if 7 <= h < 12: return 'London'
+    if 12 <= h < 16: return 'London_NY_Overlap'
+    if 16 <= h < 21: return 'New_York'
+    return 'Asian'
 
 def add_sessions(df):
-    print("  Identifying market sessions...")
     df['session'] = df['time'].apply(get_market_session)
+    df['hour'] = df['time'].dt.hour
+    df['weekday'] = df['time'].dt.weekday
     return df
 
-def add_past_candle_features(df, lookbacks=PAST_LOOKBACKS):
-    print(f"  Analyzing past candle formations...")
+# --- PAST FEATURES ---
+def add_past_features(df, lookbacks=PAST_LOOKBACKS):
+    print("  Calculating past candle features...")
     df['is_bullish'] = (df['close'] > df['open']).astype(int)
     df['body_size'] = (df['close'] - df['open']).abs()
-    # ### OPTIMIZATION 2: FIX FRAGMENTATION ###
     new_cols = {}
-    for n in lookbacks:
-        new_cols[f'bullish_ratio_last_{n}'] = df['is_bullish'].rolling(window=n).mean()
-        new_cols[f'avg_body_last_{n}'] = df['body_size'].rolling(window=n).mean()
-        new_cols[f'avg_range_last_{n}'] = (df['high'] - df['low']).rolling(window=n).mean()
+    for n in tqdm(lookbacks, desc="    Rolling features"):
+        new_cols[f'bullish_ratio_{n}'] = df['is_bullish'].rolling(n).mean()
+        new_cols[f'avg_body_{n}'] = df['body_size'].rolling(n).mean()
+        new_cols[f'avg_range_{n}'] = (df['high'] - df['low']).rolling(n).mean()
+        new_cols[f'close_SMA20_ratio_{n}'] = df['close'].rolling(n).mean() / df['close']
+        new_cols[f'EMA8_EMA21_ratio_{n}'] = df['EMA_8'].rolling(n).mean() / df['EMA_21'].rolling(n).mean()
+    print("  ✅ Past features done.")
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1).drop(columns=['is_bullish', 'body_size'])
+
+# --- REGIME FEATURES ---
+def add_regimes(df):
+    df['trend_regime'] = np.where(df['ADX'] > 25, 'trend', 'range')
+    df['vol_regime'] = np.where(df['ATR_14'] > df['ATR_14'].rolling(20).mean(), 'high_vol', 'low_vol')
+    return df
+
+# --- HIGHER TIMEFRAME FEATURES ---
+def add_htf_features(df, htf_file=None):
+    if htf_file is None:
+        print("⚠️ No higher timeframe file provided. Skipping HTF features.")
+        return df
+
+    print(f"  Loading higher timeframe data: {htf_file}")
+    htf_df = pd.read_csv(htf_file, sep=None, engine="python")
+    if htf_df.shape[1] > 5: htf_df = htf_df.iloc[:, :5]
+    htf_df.columns = ['time','open','high','low','close']
+    htf_df['time'] = pd.to_datetime(htf_df['time'])
     
-    past_df = pd.DataFrame(new_cols, index=df.index)
-    df = pd.concat([df, past_df], axis=1)
-    return df.drop(columns=['is_bullish', 'body_size'])
+    # Add some HTF indicators (SMA/EMA) if not present
+    htf_df = add_indicators(htf_df)
 
-# --- MAIN PROCESSING FUNCTION (Heavily Modified for Memory Efficiency) ---
+    # Keep only the columns we want to merge
+    htf_df = htf_df[['time','SMA_50','EMA_21']].copy()
 
-def create_silver_data(bronze_file, raw_file, silver_file):
-    print(f"Loading bronze trade data from: {os.path.basename(bronze_file)}")
-    # Only load the column we absolutely need
-    bronze_df = pd.read_csv(bronze_file, usecols=['entry_time', 'trade_type', 'sl_ratio', 'tp_ratio'])
+    # Sort by time
+    htf_df = htf_df.sort_values('time')
+    df = df.sort_values('time')
+
+    # Forward-fill HTF values to lower timeframe
+    htf_df = htf_df.set_index('time').reindex(df['time'], method='ffill').reset_index()
+    df = pd.concat([df.reset_index(drop=True), htf_df[['SMA_50','EMA_21']].reset_index(drop=True)], axis=1)
+    
+    print("  ✅ HTF features merged with forward-fill.")
+    return df
+
+
+# --- MAIN PROCESSING ---
+def create_silver_data(bronze_file, raw_file, silver_file, htf_file=None):
+    print(f"\n=== Processing file: {os.path.basename(bronze_file)} ===")
+    
+    print("Loading bronze data...")
+    bronze_df = pd.read_csv(bronze_file)
     bronze_df['entry_time'] = pd.to_datetime(bronze_df['entry_time'])
-
-    print(f"Loading raw OHLCV data from: {os.path.basename(raw_file)}")
-    raw_df = pd.read_csv(raw_file, sep=None, engine="python")
-    if raw_df.shape[1] > 5: raw_df = raw_df.iloc[:, :5]
-    raw_df.columns = ["time", "open", "high", "low", "close"]
-    raw_df["time"] = pd.to_datetime(raw_df["time"])
-    raw_df[["open", "high", "low", "close"]] = raw_df[["open", "high", "low", "close"]].apply(pd.to_numeric)
+    print(f"  Bronze data loaded: {len(bronze_df)} rows")
     
-    # --- Calculate All Features on the Raw Data ---
-    features_df = raw_df
-    features_df = add_indicators(features_df)
-    features_df = add_candlestick_patterns(features_df)
-    features_df = add_support_resistance(features_df)
-    features_df = add_sessions(features_df)
-    features_df = add_past_candle_features(features_df)
-    features_df = downcast_dtypes(features_df)
-
-    # ### --- OPTIMIZATION 3: FILTER BEFORE MERGING --- ###
-    print("\nFiltering features to match trade entry times...")
-    # Get a unique list of timestamps we need features for
-    required_times = bronze_df['entry_time'].unique()
+    print("Loading raw OHLCV data...")
+    df = pd.read_csv(raw_file, sep=None, engine='python')
+    if df.shape[1] > 5: df = df.iloc[:, :5]
+    df.columns = ['time','open','high','low','close']
+    df['time'] = pd.to_datetime(df['time'])
+    df[["open","high","low","close"]] = df[["open","high","low","close"]].apply(pd.to_numeric)
+    print(f"  Raw OHLCV loaded: {len(df)} rows")
     
-    # Create a much smaller features DataFrame that only contains rows for our trades
-    filtered_features_df = features_df[features_df['time'].isin(required_times)]
+    print(f"Removing first {REMOVE_INITIAL_ROWS} rows for indicators...")
+    df = df.iloc[REMOVE_INITIAL_ROWS:].reset_index(drop=True)
     
-    print("Merging filtered features with profitable trade data...")
-    # Now the merge is much smaller and faster
-    silver_df = pd.merge(
-        left=bronze_df, right=filtered_features_df,
-        left_on='entry_time', right_on='time',
-        how='inner'
+    # Feature calculations
+    df = add_indicators(df)
+    df = add_candlestick_patterns(df)
+    df = add_support_resistance(df)
+    df = add_sessions(df)
+    df = add_past_features(df)
+    df = add_regimes(df)
+    df = downcast_dtypes(df)
+    
+    print("Merging with bronze trade times...")
+    df = df.sort_values('time')
+    bronze_df = bronze_df.sort_values('entry_time')
+    silver_df = pd.merge_asof(
+        bronze_df,
+        df,
+        left_on='entry_time',
+        right_on='time',
+        direction='backward'
     )
     silver_df.drop(columns=['time'], inplace=True)
+    print(f"  Silver dataset created: {len(silver_df)} rows, {len(silver_df.columns)} columns")
     
-    print(f"  Original bronze trades: {len(bronze_df)}")
-    print(f"  Trades after merging: {len(silver_df)}")
-    
-    silver_df.dropna(inplace=True)
-    print(f"  Trades after removing rows with NaN values: {len(silver_df)}")
-
-    if silver_df.empty:
-        print("⚠️ No data remaining after processing.")
-        return
-        
-    silver_df = downcast_dtypes(silver_df)
     silver_df.to_csv(silver_file, index=False)
-    print(f"✅ Success! Rich dataset with {silver_df.shape[1]} features saved to {os.path.basename(silver_file)}")
+    print(f"✅ Silver dataset saved: {silver_file}\n")
 
-
-# --- MAIN EXECUTION BLOCK (Unchanged) ---
+# --- EXECUTION ---
 if __name__ == "__main__":
     core_dir = os.path.dirname(os.path.abspath(__file__))
-    raw_data_dir = os.path.abspath(os.path.join(core_dir, '..', 'raw_data'))
-    bronze_data_dir = os.path.abspath(os.path.join(core_dir, '..', 'bronze_data'))
-    silver_data_dir = os.path.abspath(os.path.join(core_dir, '..', 'silver_data'))
-    os.makedirs(silver_data_dir, exist_ok=True)
+    raw_dir = os.path.abspath(os.path.join(core_dir,'..','raw_data'))
+    bronze_dir = os.path.abspath(os.path.join(core_dir,'..','bronze_data'))
+    silver_dir = os.path.abspath(os.path.join(core_dir,'..','silver_data'))
+    os.makedirs(silver_dir, exist_ok=True)
     
-    try:
-        bronze_files = [f for f in os.listdir(bronze_data_dir) if f.endswith('.csv')]
-    except FileNotFoundError:
-        print(f"❌ Error: The directory '{bronze_data_dir}' was not found.")
-        bronze_files = []
-
-    if not bronze_files: 
-        print("❌ No CSV files found in 'bronze_data'.")
-    else: 
-        print(f"Found {len(bronze_files)} files to process...")
-
-    for filename in bronze_files:
-        bronze_path = os.path.join(bronze_data_dir, filename)
-        raw_path = os.path.join(raw_data_dir, filename)
-        silver_path = os.path.join(silver_data_dir, filename)
-        
-        print("\n" + "="*50 + f"\nProcessing: {filename}")
-        
-        if not os.path.exists(raw_path):
-            print(f"⚠️ SKIPPING: Corresponding raw data file not found at '{raw_path}'")
-            continue
-            
-        try:
-            create_silver_data(bronze_file=bronze_path, raw_file=raw_path, silver_file=silver_path)
-        except Exception as e:
-            print(f"❌ FAILED to process {filename}. Error: {e}")
-            import traceback
-            traceback.print_exc()
-
-    print("\n" + "="*50 + "\nSilver data generation complete.")
+    bronze_files = [f for f in os.listdir(bronze_dir) if f.endswith('.csv')]
+    
+    for fname in bronze_files:
+        bronze_path = os.path.join(bronze_dir, fname)
+        raw_path = os.path.join(raw_dir, fname)
+        silver_path = os.path.join(silver_dir, fname)
+        create_silver_data(bronze_path, raw_path, silver_path)
+    
+    print("✅ Silver data generation complete!")
