@@ -45,14 +45,12 @@ def get_config_from_filename(filename):
     print(f"⚠️ Could not determine a valid timeframe preset for {filename}. Skipping file.")
     return None
 
-def process_file(task_args):
+def process_file(task_id, input_file, output_file, config):
     """
-    Wrapper function for multiprocessing. Unpacks arguments and calls the main processing logic.
+    Worker function for multiprocessing. It now uses a task_id to position its progress bar.
     """
-    input_file, output_file, config = task_args
     filename = os.path.basename(input_file)
-    print(f"Starting processing for: {filename}")
-
+    
     # Unpack the config for this specific task
     SL_RATIOS = config["SL_RATIOS"]
     TP_RATIOS = config["TP_RATIOS"]
@@ -65,13 +63,15 @@ def process_file(task_args):
         df["time"] = pd.to_datetime(df["time"])
         df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].apply(pd.to_numeric)
     except Exception as e:
+        # Using a lock or some other method to print safely would be ideal, but for errors it's often okay.
         print(f"❌ Error loading or parsing {filename}: {e}")
-        return
+        return f"Error: {filename}"
 
     profitable_trades = []
     
-    # tqdm is used here to show progress for each individual file process
-    for i in tqdm(range(len(df) - 1), desc=f"Processing {filename}", position=0, leave=True):
+    # MODIFICATION 2: The `position=task_id` argument tells tqdm which line to draw on.
+    # `leave=True` ensures the bar stays on screen after completion.
+    for i in tqdm(range(len(df) - 1), desc=f"{filename}", position=task_id, leave=True):
         entry_time, entry_price = df.loc[i, "time"], df.loc[i, "close"]
 
         buy_tps = {round(entry_price * (1 + r), 5): r for r in TP_RATIOS}
@@ -83,6 +83,7 @@ def process_file(task_args):
         for j in range(i + 1, lookforward_limit):
             future_high, future_low, exit_time = df.loc[j, "high"], df.loc[j, "low"], df.loc[j, "time"]
 
+            # The core logic for finding trades remains the same
             if buy_sls:
                 hit_tps = {p: r for p, r in buy_tps.items() if p <= future_high}
                 if hit_tps:
@@ -106,13 +107,10 @@ def process_file(task_args):
             if not buy_sls and not sell_sls: break
     
     if not profitable_trades:
-        print(f"⚠️ No profitable trades found for {filename}.")
-        return
+        return f"No trades found for {filename}."
 
-    print(f"\n✅ Found {len(profitable_trades)} trades in {filename}. Saving...")
     pd.DataFrame(profitable_trades).to_csv(output_file, index=False)
-    print(f"SUCCESS: Data for {filename} saved to {output_file}")
-
+    return f"SUCCESS: {len(profitable_trades)} trades found in {filename}."
 
 if __name__ == "__main__":
     start_time = time.time()
@@ -133,28 +131,33 @@ if __name__ == "__main__":
         # --- 1. Prepare the list of tasks for the multiprocessing pool ---
         print(f"Found {len(raw_files)} files to process...")
         tasks = []
-        for filename in raw_files:
+        # MODIFICATION 3: Use enumerate to add a unique task_id to each task.
+        for task_id, filename in enumerate(raw_files):
             config = get_config_from_filename(filename)
             if config:
                 input_path = os.path.join(raw_data_dir, filename)
                 output_path = os.path.join(bronze_data_dir, filename)
-                tasks.append((input_path, output_path, config))
+                tasks.append((task_id, input_path, output_path, config))
             else:
                 print(f"⚠️ Skipping {filename}: No valid timeframe config found.")
         
         if not tasks:
             print("❌ No valid files to process after checking configurations.")
         else:
-            # --- 2. Set up and run the processing pool ---
-            # Use one less than the total number of CPUs to keep the system responsive
-            num_processes = max(1, cpu_count() - 1)
+            # num_processes = max(1, cpu_count() - 1)
+            num_processes = 2  # For testing purposes, limit to 2 processes
             print("\n" + "="*50)
-            print(f"🚀 Starting multiprocessing pool with {num_processes} workers to process {len(tasks)} files.")
+            print(f"🚀 Starting multiprocessing pool with {num_processes} workers for {len(tasks)} files.")
             print("="*50 + "\n")
 
             with Pool(processes=num_processes) as pool:
-                # The map function will distribute the 'tasks' list to the 'process_file' function
-                pool.map(process_file, tasks)
+                # MODIFICATION 4: Use `starmap` to pass the multiple arguments from each task tuple.
+                results = pool.starmap(process_file, tasks)
+
+            # Print results after all processes are finished
+            print("\n" + "="*50 + "\nProcessing Summary:")
+            for res in results:
+                print(res)
 
     end_time = time.time()
     print("\n" + "="*50)
