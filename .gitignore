@@ -3,3 +3,15 @@ strategy_finder_env/
 
 # Ignore bronze data files
 bronze_data/*.csv
+
+# Ignore silver data files
+silver_data/*
+
+# Ignore reports
+reports/*
+
+# Ignore test files
+test_data/*
+
+# Ignore gold data files
+gold_data/*
