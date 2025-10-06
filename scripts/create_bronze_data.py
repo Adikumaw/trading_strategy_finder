@@ -6,26 +6,42 @@ from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 import time
 
+# --- GLOBAL CONFIGURATION ---
+USE_MULTIPROCESSING = False  # Set to False for running on custom process count for limited testing
+MAX_CPU_USAGE = max(1, cpu_count() - 2)  # Leave 2 cores free for system responsiveness
+
 # --- Timeframe Presets for SL/TP ---
 # This dictionary remains unchanged.
 TIMEFRAME_PRESETS = {
     "1m": {
-        "SL_RATIOS": np.arange(0.001, 0.0105, 0.001), "TP_RATIOS": np.arange(0.001, 0.0205, 0.001), "MAX_LOOKFORWARD": 200
+        "SL_RATIOS": np.arange(0.0005, 0.0105, 0.0005),  # 0.05% - 1.0%
+        "TP_RATIOS": np.arange(0.0005, 0.0205, 0.0005),  # 0.05% - 2.0%
+        "MAX_LOOKFORWARD": 200
     },
     "5m": {
-        "SL_RATIOS": np.arange(0.002, 0.0155, 0.001), "TP_RATIOS": np.arange(0.002, 0.0305, 0.001), "MAX_LOOKFORWARD": 300
+        "SL_RATIOS": np.arange(0.001, 0.0155, 0.0005),  # 0.1% - 1.5%
+        "TP_RATIOS": np.arange(0.001, 0.0305, 0.0005),  # 0.1% - 3.0%
+        "MAX_LOOKFORWARD": 300
     },
     "15m": {
-        "SL_RATIOS": np.arange(0.003, 0.0205, 0.001), "TP_RATIOS": np.arange(0.003, 0.0405, 0.001), "MAX_LOOKFORWARD": 400
+        "SL_RATIOS": np.arange(0.002, 0.0255, 0.001),   # 0.2% - 2.5%
+        "TP_RATIOS": np.arange(0.002, 0.0505, 0.001),   # 0.2% - 5.0%
+        "MAX_LOOKFORWARD": 400
     },
     "30m": {
-        "SL_RATIOS": np.arange(0.005, 0.0255, 0.001), "TP_RATIOS": np.arange(0.005, 0.0505, 0.001), "MAX_LOOKFORWARD": 500
+        "SL_RATIOS": np.arange(0.003, 0.0355, 0.001),   # 0.3% - 3.5%
+        "TP_RATIOS": np.arange(0.003, 0.0705, 0.001),   # 0.3% - 7.0%
+        "MAX_LOOKFORWARD": 500
     },
     "60m": {
-        "SL_RATIOS": np.arange(0.010, 0.0305, 0.001), "TP_RATIOS": np.arange(0.010, 0.0705, 0.001), "MAX_LOOKFORWARD": 600
+        "SL_RATIOS": np.arange(0.005, 0.0505, 0.001),   # 0.5% - 5.0%
+        "TP_RATIOS": np.arange(0.005, 0.1005, 0.001),   # 0.5% - 10.0%
+        "MAX_LOOKFORWARD": 600
     },
     "240m": {
-        "SL_RATIOS": np.arange(0.020, 0.0505, 0.001), "TP_RATIOS": np.arange(0.020, 0.1005, 0.001), "MAX_LOOKFORWARD": 800
+        "SL_RATIOS": np.arange(0.010, 0.1005, 0.001),   # 1.0% - 10.0%
+        "TP_RATIOS": np.arange(0.010, 0.2005, 0.001),   # 1.0% - 20.0%
+        "MAX_LOOKFORWARD": 800
     }
 }
 
@@ -130,6 +146,24 @@ if __name__ == "__main__":
     else:
         # --- 1. Prepare the list of tasks for the multiprocessing pool ---
         print(f"Found {len(raw_files)} files to process...")
+        
+        # remove files that are already processed and present in bronze_data
+        raw_files = [f for f in raw_files if not os.path.exists(os.path.join(bronze_data_dir, f))]
+        print(f"{len(raw_files)} files remaining after filtering already processed files.")
+
+        # Ask user for which processing mode to use
+        use_multiprocessing = input("Use multiprocessing? (y/n): ").strip().lower() == 'y'
+        if use_multiprocessing:
+            num_processes = MAX_CPU_USAGE
+        else:
+            num_processes = int(input("Enter number of processes to use (1 for single process): ").strip())
+            try:
+                if num_processes < 1 or num_processes > MAX_CPU_USAGE:
+                    raise ValueError
+            except ValueError:
+                print("Invalid input Or out of range. Defaulting to 1 process.")
+                num_processes = 1
+
         tasks = []
         # MODIFICATION 3: Use enumerate to add a unique task_id to each task.
         for task_id, filename in enumerate(raw_files):
@@ -144,8 +178,6 @@ if __name__ == "__main__":
         if not tasks:
             print("❌ No valid files to process after checking configurations.")
         else:
-            # num_processes = max(1, cpu_count() - 1)
-            num_processes = 2  # For testing purposes, limit to 2 processes
             print("\n" + "="*50)
             print(f"🚀 Starting multiprocessing pool with {num_processes} workers for {len(tasks)} files.")
             print("="*50 + "\n")
