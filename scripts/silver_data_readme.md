@@ -1,296 +1,158 @@
-# 🪙 Silver Data Generator (Hybrid Optimized Version)
+# 🧠 Silver Data Generator (AI Feature Enrichment Pipeline)
 
-This project automates the creation of **Silver Datasets** for algorithmic trading and quantitative analysis — combining raw OHLCV market data with technical indicators, support/resistance levels, and other engineered features to create a clean, model-ready dataset.
+This Python script transforms the basic trade simulations from the **"Bronze Dataset"** into a feature-rich **"Silver Dataset"** ready for advanced machine learning analysis. It acts as the critical bridge between raw trade outcomes and intelligent strategy discovery.
 
-Built for **large-scale datasets (7–10 GB)** and **optimized for speed and memory efficiency** using:
-
--   🧮 **Numba** for hybrid fast computation
--   📈 **TA-Lib** + **TA** for indicators
--   💾 **Chunked CSV Processing**
--   ⚙️ **Smart Downcasting** for low memory use
+The script's core purpose is to enrich each simulated trade with a deep snapshot of the market's context at the moment of entry, asking: **_What was the market doing and looking like when this trade was initiated?_**
 
 ---
 
-## 🚀 Overview
+## ⚙️ How It Works
 
-### 📘 What it does
+1.  **Matching Files:** The script finds corresponding files in `raw_data/` and `bronze_data/` (e.g., `EURUSD1.csv` in both).
+2.  **Historical Feature Calculation:** It first loads the entire `raw_data` (OHLCV) file to calculate a vast array of historical technical indicators and patterns. This is done once per file and cached in memory for efficiency.
+3.  **Chunk Processing:** It reads the potentially massive `bronze_data` file in manageable chunks to avoid memory overload.
+4.  **Contextual Merging:** For each trade in a chunk, it looks up the `entry_time` and merges the entire pre-calculated market context (all indicators, patterns, etc.) onto that trade's row.
+5.  **Relational Feature Generation:** This is the script's most powerful step. After merging, it calculates **new relational features** that describe where the trade's Stop-Loss (SL) and Take-Profit (TP) levels are positioned relative to key market structures (like Support/Resistance, Bollinger Bands, and moving averages).
+6.  **Saving the Silver Dataset:** The final, enriched data for each file is appended to a new CSV in the `silver_data/` directory.
 
-This pipeline transforms:
+---
+
+## 📁 Folder Structure
+
+This script consumes data from `raw_data` and `bronze_data` to produce its output in `silver_data`.
 
 ```
-
-RAW (OHLCV data) + BRONZE (Trade entries)
-↓
-SILVER (Feature-rich dataset)
-
-```
-
-Each _Silver_ dataset includes:
-
--   40+ Technical Indicators
--   Support & Resistance Zones
--   Candle & Price Action Stats
--   Market Session Features
--   Trend & Volatility Regimes
--   Cleaned, Merged Trade Records
-
----
-
-## 🧩 Pipeline Summary
-
-| Step                       | Description                                                                                                      |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| **1️⃣ Load Raw Data**       | Loads OHLCV candles, cleans, and formats columns.                                                                |
-| **2️⃣ Add Features**        | Calculates all technical indicators and patterns using TA-Lib, TA, and Numba-based support/resistance detection. |
-| **3️⃣ Warmup Cutoff**       | Removes the initial unstable rows (e.g., first 200 candles).                                                     |
-| **4️⃣ Load Bronze Data**    | Loads trades in chunks (1M rows at a time).                                                                      |
-| **5️⃣ Merge Efficiently**   | Uses `pd.merge_asof` to attach the latest available candle features to each trade.                               |
-| **6️⃣ Write Incrementally** | Saves the merged dataset to disk without loading everything in memory.                                           |
-
----
-
-## ⚙️ Configuration
-
-You can customize parameters at the top of the script:
-
-```python
-SMA_PERIODS = [20, 50, 100, 200]
-EMA_PERIODS = [8, 13, 21, 50]
-BBANDS_PERIOD, BBANDS_STD_DEV = 20, 2.0
-RSI_PERIOD = 14
-MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
-ATR_PERIOD, ADX_PERIOD = 14, 14
-SR_LOOKBACK = 200
-PAST_LOOKBACKS = [3, 5, 10, 20, 50]
-
-INDICATOR_WARMUP_PERIOD = 200
-BRONZE_CHUNK_SIZE = 1_000_000
-```
-
-| Variable                  | Description                                            |
-| ------------------------- | ------------------------------------------------------ |
-| `SMA_PERIODS`             | Periods for simple moving averages                     |
-| `EMA_PERIODS`             | Periods for exponential moving averages                |
-| `SR_LOOKBACK`             | Candles to look back when detecting Support/Resistance |
-| `BRONZE_CHUNK_SIZE`       | Number of rows processed per chunk from bronze data    |
-| `INDICATOR_WARMUP_PERIOD` | Rows to skip until indicators stabilize                |
-
----
-
-## 🧠 Feature Engineering Breakdown
-
-### 📊 Trend Indicators
-
--   `SMA_xx`, `EMA_xx`
--   `MACD`, `MACD_signal`, `MACD_hist`
-
-### ⚡ Momentum & Oscillators
-
--   `RSI_14`, `CCI_20`, `MOM_10`
-
-### 📉 Volatility Indicators
-
--   `ATR_14`
--   `BB_upper`, `BB_lower`, `BB_width`
-
-### 🕯️ Candlestick Patterns
-
--   Adds all TA-Lib patterns (`CDLENGULFING`, `CDLDOJI`, etc.)
-
-### 💎 Support & Resistance (Hybrid)
-
--   Uses Numba-accelerated hybrid S/R detection algorithm.
--   Returns pivot-based support and resistance levels validated across lookback.
-
-### 🕰️ Market Session Features
-
-Automatically assigns:
-
--   `London`
--   `London_NY_Overlap`
--   `New_York`
--   `Asian`
-
-Also includes:
-
--   `hour`, `weekday`
-
-### 📈 Price Action Stats
-
-For each lookback window (`3, 5, 10, 20, 50`):
-
--   `bullish_ratio_last_n`
--   `avg_body_last_n`
--   `avg_range_last_n`
--   `close_SMA20_ratio_n`
--   `EMA8_EMA21_ratio_n`
-
-### 📉 Regime Detection
-
-Defines:
-
--   `trend_regime` → `"trend"` or `"range"`
--   `vol_regime` → `"high_vol"` or `"low_vol"`
-
----
-
-## 🧮 Support/Resistance Hybrid Logic
-
-The hybrid version combines **pivot detection** and **rolling validation**:
-
--   Finds local highs/lows (pivot points).
--   Confirms whether they remain unbroken for `SR_LOOKBACK` candles.
--   Produces stable and realistic support/resistance zones.
-
-It’s powered by **Numba JIT** for near-C-speed execution.
-
----
-
-## 💾 Handling Huge Data (7–10 GB CSVs)
-
-The pipeline is designed for scalability:
-
--   Loads trades in **chunks** (`BRONZE_CHUNK_SIZE`)
--   Merges efficiently using **as-of merge**
--   **Downcasts** datatypes (`float64 → float32`)
--   Writes incrementally to avoid memory overflows
-
----
-
-## 🧰 Directory Structure
-
-```
-project/
+project_root/
 │
-├── raw_data/           # Raw OHLCV data files
-│   ├── AUDUSD1.csv
+├── raw_data/             # INPUT: Raw OHLCV data (no header)
 │   ├── EURUSD1.csv
 │   └── ...
 │
-├── bronze_data/        # Trade data files (entries, exits)
-│   ├── AUDUSD1.csv
+├── bronze_data/          # INPUT: Trade simulations from the bronze script
+│   ├── EURUSD1.csv
 │   └── ...
 │
-├── silver_data/        # Output feature-rich datasets
-│   ├── AUDUSD1_silver.csv
+├── silver_data/          # OUTPUT: ML-ready enriched datasets (auto-created)
+│   ├── EURUSD1.csv
 │   └── ...
 │
-└── generate_silver_data.py  # This script
+└── scripts/
+    └── silver_data_generator.py   # This script
 ```
 
 ---
 
-## ▶️ How to Run
+## 🧩 Input Data Format
 
-1. **Place your raw and bronze data** in respective folders:
+The script requires two input files for each instrument:
 
-    ```
-    ./raw_data/
-    ./bronze_data/
-    ```
+1.  **`bronze_data/{instrument}.csv`**:
+    -   Must contain a header row.
+    -   Expected columns include `entry_time`, `sl_price`, `tp_price`, etc.
+2.  **`raw_data/{instrument}.csv`**:
+    -   Must **NOT** contain a header row.
+    -   Expected columns are `time, open, high, low, close, [volume]`.
 
-2. **Install dependencies**:
+The script will fail if the corresponding raw data file for a bronze file is missing.
+
+---
+
+## 🚀 Feature Engineering Engine
+
+This script is a comprehensive feature generation powerhouse. For every single trade, it calculates:
+
+| Feature Category           | Examples                                                                      | Purpose                                                                 |
+| :------------------------- | :---------------------------------------------------------------------------- | :---------------------------------------------------------------------- |
+| **Technical Indicators**   | `SMA`, `EMA`, `RSI`, `MACD`, `Bollinger Bands`, `ATR`, `ADX`, `CCI`, `OBV`    | Quantify market momentum, trend, volatility, and volume dynamics.       |
+| **Candlestick Patterns**   | `CDLDOJI`, `CDLENGULFING`, `CDLHAMMER`, etc. (Dozens from `talib`)            | Capture classic price action signals and potential reversals.           |
+| **Support & Resistance**   | `support`, `resistance` (calculated with a fast, Numba-accelerated algorithm) | Identify key historical price levels that might influence future price. |
+| **Price Action & Regimes** | `bullish_ratio_last_N`, `avg_body_last_N`, `trend_regime`, `vol_regime`       | Characterize recent price behavior and the overall market state.        |
+| **Time-Based Features**    | `session` (Asian, London, NY), `hour`, `weekday`                              | Allow the model to find patterns related to time of day or week.        |
+
+---
+
+## ✨ The Secret Sauce: Relational Features
+
+Beyond standard indicators, this script generates novel features that give a model true market structure awareness. Instead of just knowing a trade's SL/TP ratio, the model learns **where the SL and TP are placed in relation to the market.**
+
+This helps answer critical questions like:
+
+-   _Is the Stop Loss safely behind a strong support level or exposed in open space?_
+-   _Is the Take Profit aiming for a realistic target just before a resistance level, or is it unlikely to be hit?_
+-   _How far is the TP from the upper Bollinger Band?_
+
+#### Example Generated Features:
+
+-   `sl_dist_to_support_norm`
+-   `tp_dist_to_resistance_norm`
+-   `sl_dist_to_bb_upper_norm`
+-   `tp_dist_to_sma_50_norm`
+-   ...and many more for all key indicators.
+
+These features are **normalized by the closing price**, making them comparable across different assets and timeframes.
+
+---
+
+## ⚡ Performance & Efficiency
+
+-   **Chunking:** Processes massive bronze files in `1,000,000` row chunks to operate on systems with limited RAM.
+-   **Indicator Warmup:** Skips the first `200` candles of historical data to ensure that indicators have enough data to produce stable, meaningful values.
+-   **Numba JIT Compilation:** The Support and Resistance algorithm is accelerated with Numba for high-speed calculation on large datasets.
+-   **Downcasting:** Automatically reduces the memory footprint of the final dataset by downcasting data types (e.g., `float64` to `float32`).
+
+---
+
+## 🧮 Example Workflow
+
+1.  **Prerequisite:** Ensure you have already run `bronze_data_generator.py` and have populated the `bronze_data` folder.
+
+2.  **Run the script:**
 
     ```bash
-    pip install pandas numpy ta talib tqdm numba
+    python scripts/silver_data_generator.py
     ```
 
-3. **Run the script**:
-
-    ```bash
-    python generate_silver_data.py
-    ```
-
-4. **Output** will appear in:
+3.  **Monitor the output:** The script will process each file pair it finds.
 
     ```
-    ./silver_data/
+    =========================
+    Processing: AUDUSD1.csv
+    =========================
+    Loading raw OHLCV to determine indicator warmup period...
+    Calculating all historical features...
+    ✅ Historical features calculated and cached in memory.
+    ...
+    Merging Bronze Chunks: 100%|██████████| 5/5 [00:30<00:00, 6.00s/it]
+
+    ✅ Success! Rich dataset with all chunks merged saved to AUDUSD1.csv
     ```
 
----
-
-## 🧩 Integration with Higher Timeframes (Optional)
-
-The script supports merging with **higher timeframe features** (e.g., 60m or 240m data) for richer context.
-
-Example:
-
-```
-AUDUSD1.csv  +  AUDUSD60.csv  →  AUDUSD1_silver.csv
-```
-
-This multi-timeframe design improves ML model accuracy and trade signal reliability.
+4.  **Final Output:** The `silver_data` folder will now contain CSVs with a massive number of columns, ready for analysis.
 
 ---
 
-## 🧱 Tech Stack
+## 🧱 Output File Description
 
-| Library         | Purpose                                    |
-| --------------- | ------------------------------------------ |
-| **Pandas**      | Data processing & chunk management         |
-| **NumPy**       | Vectorized calculations                    |
-| **Numba**       | Accelerated Support/Resistance computation |
-| **TA-Lib / ta** | Technical indicators                       |
-| **TQDM**        | Progress visualization                     |
+Each output CSV in `silver_data/` is an extremely wide file containing every column from the original bronze data file, plus dozens of new feature columns.
 
----
+**Structure:** `[Original Bronze Columns] + [Market Data Columns] + [Indicator Columns] + [Pattern Columns] + [Relational Feature Columns]`
 
-## 🧠 Key Advantages
+#### A Small Sample of Added Columns:
 
-✅ Handles datasets up to **10GB** easily
-✅ Near **C-speed S/R detection** with Numba
-✅ **Modular and extensible** design
-✅ Generates **clean, ML-ready data**
-✅ Automatic **session classification**
-✅ Efficient **RAM usage** (downcasting + chunking)
-
----
-
-## 📎 Example Output Columns
-
-| Column                              | Description                          |
-| ----------------------------------- | ------------------------------------ |
-| `time`                              | Candle timestamp                     |
-| `open, high, low, close, volume`    | OHLCV data                           |
-| `EMA_21, SMA_200, RSI_14`           | Technical indicators                 |
-| `support_points, resistance_points` | Hybrid support/resistance            |
-| `session`                           | Trading session                      |
-| `trend_regime, vol_regime`          | Market regimes                       |
-| `bullish_ratio_last_10`             | % of bullish candles in last 10 bars |
-| `entry_time, exit_time, pnl`        | Merged from bronze trade data        |
+| Column                         | Description                                                                  |
+| :----------------------------- | :--------------------------------------------------------------------------- |
+| `open`, `high`, `low`, `close` | The OHLC of the entry candle.                                                |
+| `SMA_20`, `SMA_200`            | 20-period and 200-period Simple Moving Averages.                             |
+| `RSI_14`                       | The 14-period Relative Strength Index.                                       |
+| `CDLENGULFING`                 | A flag (100 for bullish, -100 for bearish) if an engulfing pattern occurred. |
+| `support`                      | The most recent valid support level.                                         |
+| `trend_regime`                 | The market state ('trend' or 'range') based on the ADX.                      |
+| `sl_dist_to_support_norm`      | The normalized price distance from the SL to the support level.              |
+| `tp_dist_to_sma_100_norm`      | The normalized price distance from the TP to the 100-period SMA.             |
+| ...and over 100 more.          |                                                                              |
 
 ---
 
-## 📚 Notes
+## 📈 Example Use Case
 
--   Works with both **5-column** and **6-column** raw data formats.
--   The script auto-corrects separators and formats.
--   Minimum 200 candles required before indicator stability.
-
----
-
-## 🧠 Future Enhancements
-
--   📦 Multi-Timeframe Feature Stacking (HTF + LTF)
--   🔥 Parallel chunk processing with `multiprocessing`
--   🧰 Optional SQLite/Parquet backend
--   🧠 Built-in model training hooks
-
----
-
-## 🤝 Author
-
-**Gaurav Kumawat**
-Front-End & Quant Developer
-💬 Built with ❤️ and caffeine for large-scale trading analytics.
-
----
-
-## 📜 License
-
-This project is distributed under the **MIT License**.
-You’re free to use, modify, and integrate it into your projects with attribution.
-
----
-
-### ✨ “From raw noise to structured signal — the Silver Data Generator bridges chaos and clarity.” ⚡
+The silver dataset is the ideal input for training supervised machine learning models (e.g., RandomForest, XGBoost, Neural Networks) to predict the `outcome` ('win' or 'loss') of a trade based on the rich market context provided.
