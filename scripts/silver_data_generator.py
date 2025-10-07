@@ -18,6 +18,10 @@ ADX_PERIOD = 14
 SR_LOOKBACK = 200
 PAST_LOOKBACKS = [3, 5, 10, 20, 50]
 
+# --- CORRECTED S/R CONFIG ---
+# This window is used to identify a pivot. A low is a support pivot if it's the
+# lowest point within N candles to the left and N candles to the right.
+PIVOT_WINDOW = 10 
 # --- NEW: Define the warmup period ---
 INDICATOR_WARMUP_PERIOD = 200 # Rows to remove from the start of raw data
 # Process the huge bronze file in chunks of this size
@@ -117,52 +121,50 @@ def add_all_features(df):
 
     return df
 
+# --- 1️⃣: THIS IS THE CORRECTED S/R LOGIC ---
 @numba.njit
-def _calculate_s_r_numba(lows, highs, lookback=SR_LOOKBACK):
+def _calculate_s_r_numba(lows, highs, window):
+    """
+    Identifies pivot points for support and resistance.
+    A low is a support pivot if it's the lowest value in a window around it.
+    A high is a resistance pivot if it's the highest value in a window around it.
+    """
     n = len(lows)
-    supports = np.full(n, np.nan, dtype=np.float32)
-    resistances = np.full(n, np.nan, dtype=np.float32)
-    last_support = np.nan
-    last_resistance = np.nan
-    for i in range(lookback + 2, n - 2):
-        # --- Step 1: Detect local pivot supports/resistances ---
-        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
-            last_support = lows[i]
-        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
-            last_resistance = highs[i]
+    support_points = np.full(n, np.nan, dtype=np.float32)
+    resistance_points = np.full(n, np.nan, dtype=np.float32)
 
-        # --- Step 2: Validation within lookback window ---
-        # Support remains valid only if not broken in lookback range
-        if not np.isnan(last_support):
-            valid = True
-            for j in range(max(0, i - lookback), i):
-                if lows[j] < last_support:
-                    valid = False; break
-            if valid:
-                supports[i] = last_support
-            else:
-                last_support = np.nan
+    # Iterate from the first possible pivot to the last
+    for i in range(window, n - window):
+        # Define the window to check
+        window_lows = lows[i - window : i + window + 1]
+        window_highs = highs[i - window : i + window + 1]
+        
+        # Check for support
+        if lows[i] == np.min(window_lows):
+            support_points[i] = lows[i]
+            
+        # Check for resistance
+        if highs[i] == np.max(window_highs):
+            resistance_points[i] = highs[i]
+            
+    return support_points, resistance_points
 
-        # Resistance remains valid only if not broken in lookback range
-        if not np.isnan(last_resistance):
-            valid = True
-            for j in range(max(0, i - lookback), i):
-                if highs[j] > last_resistance:
-                    valid = False; break
-            if valid:
-                resistances[i] = last_resistance
-            else:
-                last_resistance = np.nan
-    return supports, resistances
-
-def add_support_resistance(df, lookback=SR_LOOKBACK):
+def add_support_resistance(df, window=PIVOT_WINDOW):
+    """
+    Calculates support and resistance levels based on pivot points.
+    """
     lows = df["low"].values.astype(np.float32)
     highs = df["high"].values.astype(np.float32)
-    supports, resistances = _calculate_s_r_numba(lows, highs, lookback)
-    df["support_points"] = supports
-    df["resistance_points"] = resistances
+    
+    support_points, resistance_points = _calculate_s_r_numba(lows, highs, window)
+    
+    df["support_points"] = support_points
+    df["resistance_points"] = resistance_points
+
+    # Carry forward the last known S/R level
     df["support"] = df["support_points"].ffill()
     df["resistance"] = df["resistance_points"].ffill()
+    
     return df.drop(columns=["support_points", "resistance_points"])
 
 # 1️⃣ --- CORE IDEA: NEW FUNCTION TO ADD RELATIONAL FEATURES ---
