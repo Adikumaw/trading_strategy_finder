@@ -137,19 +137,44 @@ Each output CSV in `silver_data/` is an extremely wide file containing every col
 
 **Structure:** `[Original Bronze Columns] + [Market Data Columns] + [Indicator Columns] + [Pattern Columns] + [Relational Feature Columns]`
 
-#### A Small Sample of Added Columns:
+#### A Sample of Added Columns:
 
-| Column                         | Description                                                                  |
-| :----------------------------- | :--------------------------------------------------------------------------- |
-| `open`, `high`, `low`, `close` | The OHLC of the entry candle.                                                |
-| `SMA_20`, `SMA_200`            | 20-period and 200-period Simple Moving Averages.                             |
-| `RSI_14`                       | The 14-period Relative Strength Index.                                       |
-| `CDLENGULFING`                 | A flag (100 for bullish, -100 for bearish) if an engulfing pattern occurred. |
-| `support`                      | The most recent valid support level.                                         |
-| `trend_regime`                 | The market state ('trend' or 'range') based on the ADX.                      |
-| `sl_dist_to_support_norm`      | The normalized price distance from the SL to the support level.              |
-| `tp_dist_to_sma_100_norm`      | The normalized price distance from the TP to the 100-period SMA.             |
-| ...and over 100 more.          |                                                                              |
+| Column                                                                    | Description                                                                |
+| :------------------------------------------------------------------------ | :------------------------------------------------------------------------- |
+| `open`, `high`, `low`, `close`                                            | The OHLC of the entry candle.                                              |
+| `volume`                                                                  | Volume of the entry candle.                                                |
+| `SMA_20`, `SMA_50`, `SMA_100`, `SMA_200`                                  | Simple Moving Averages for trend detection.                                |
+| `EMA_8`, `EMA_13`, `EMA_21`, `EMA_50`                                     | Exponential Moving Averages for shorter-term trend tracking.               |
+| `RSI_14`                                                                  | Relative Strength Index for momentum.                                      |
+| `MACD_hist`                                                               | MACD histogram for trend strength.                                         |
+| `BB_upper`, `BB_lower`, `BB_width`                                        | Bollinger Bands for volatility and price envelope.                         |
+| `ATR_14`                                                                  | Average True Range for market volatility.                                  |
+| `ADX`                                                                     | Average Directional Index for trend strength.                              |
+| `MOM_10`, `CCI_20`                                                        | Momentum and Commodity Channel Index indicators.                           |
+| `OBV`                                                                     | On-Balance Volume indicator.                                               |
+| `CDL2CROWS`, `CDL3BLACKCROWS`, `CDL3INSIDE`, `CDLENGULFING`, `CDLDOJI`, … | Classic candlestick pattern flags from TA-Lib.                             |
+| `support`, `resistance`                                                   | Key historical support and resistance levels.                              |
+| `session`, `hour`, `weekday`                                              | Time-based features to detect session/weekday effects.                     |
+| `bullish_ratio_last_3`, `avg_body_last_3`, `avg_range_last_3`             | Rolling price action stats (last 3 candles).                               |
+| `bullish_ratio_last_5`, `avg_body_last_5`, …                              | Rolling stats for last 5, 10, 20, 50 candles.                              |
+| `close_SMA20_ratio_3`, `EMA8_EMA21_ratio_3`, …                            | Relative ratios to moving averages for trend context.                      |
+| `trend_regime`                                                            | Market trend regime based on ADX (`trend` or `range`).                     |
+| `vol_regime`                                                              | Volatility regime based on ATR (`high_vol` or `low_vol`).                  |
+| `sl_dist_to_support_norm`, `tp_dist_to_support_norm`                      | Normalized SL/TP distance to support level.                                |
+| `sl_dist_to_resistance_norm`, `tp_dist_to_resistance_norm`                | Normalized SL/TP distance to resistance level.                             |
+| `sl_dist_to_bb_upper_norm`, `tp_dist_to_bb_upper_norm`                    | Normalized SL/TP distance to upper Bollinger Band.                         |
+| `sl_dist_to_bb_lower_norm`, `tp_dist_to_bb_lower_norm`                    | Normalized SL/TP distance to lower Bollinger Band.                         |
+| `sl_dist_to_sma_20_norm`, `tp_dist_to_sma_20_norm`                        | Normalized SL/TP distance to SMA 20.                                       |
+| `sl_dist_to_sma_50_norm`, `tp_dist_to_sma_50_norm`                        | Normalized SL/TP distance to SMA 50.                                       |
+| `sl_dist_to_sma_100_norm`, `tp_dist_to_sma_100_norm`                      | Normalized SL/TP distance to SMA 100.                                      |
+| `sl_dist_to_sma_200_norm`, `tp_dist_to_sma_200_norm`                      | Normalized SL/TP distance to SMA 200.                                      |
+| `sl_dist_to_ema_8_norm`, `tp_dist_to_ema_8_norm`                          | Normalized SL/TP distance to EMA 8.                                        |
+| `sl_dist_to_ema_13_norm`, `tp_dist_to_ema_13_norm`                        | Normalized SL/TP distance to EMA 13.                                       |
+| `sl_dist_to_ema_21_norm`, `tp_dist_to_ema_21_norm`                        | Normalized SL/TP distance to EMA 21.                                       |
+| `sl_dist_to_ema_50_norm`, `tp_dist_to_ema_50_norm`                        | Normalized SL/TP distance to EMA 50.                                       |
+| `sl_dist_to_atr_up_1x_norm`, `tp_dist_to_atr_up_1x_norm`                  | Normalized SL/TP distance to ATR-based dynamic upper level.                |
+| `sl_dist_to_atr_down_1x_norm`, `tp_dist_to_atr_down_1x_norm`              | Normalized SL/TP distance to ATR-based dynamic lower level.                |
+| …and over 50+ more columns                                                | Additional candlestick patterns, rolling features, and relational metrics. |
 
 ---
 
