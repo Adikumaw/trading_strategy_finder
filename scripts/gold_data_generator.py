@@ -3,96 +3,65 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 import os
 import re
+from tqdm import tqdm
 
-def create_gold_data(
-    silver_csv_path,
-    output_dir="../gold_data",
-):
+# --- CONFIGURATION ---
+GOLD_CHUNK_SIZE = 1_000_000  # How many rows to process at a time to manage memory
+
+def downcast_dtypes(df):
     """
-    Transforms the silver dataset into a normalized, ML-ready "gold" dataset
-    by converting all absolute price indicators into relational features.
-
-    This script performs the following key steps:
-    1.  Identifies all columns representing absolute price levels (OHLC, SMAs, EMAs, S/R, etc.).
-    2.  Creates new relational features by calculating the normalized distance of these
-        levels from the entry candle's closing price.
-    3.  Drops the original absolute price columns, keeping only the new relational ones.
-    4.  Applies One-Hot Encoding to categorical features (e.g., 'session', 'trade_type').
-    5.  Bucketizes candlestick pattern columns into a simpler, more effective range.
-    6.  Applies StandardScaler (Z-score normalization) to ALL final numeric features
-        to prepare them for model training.
+    Downcasts numeric columns to more memory-efficient types (float32).
+    This is the key to reducing the final file size.
     """
-    if not os.path.exists(silver_csv_path):
-        print(f"❌ ERROR: Silver data file not found at: {silver_csv_path}")
-        return
+    for col in df.select_dtypes(include=['float64']).columns:
+        df[col] = df[col].astype('float32')
+    for col in df.select_dtypes(include=['int64']).columns:
+        df[col] = df[col].astype('int32')
+    return df
 
-    print(f"Loading silver data from: {os.path.basename(silver_csv_path)}...")
-    df = pd.read_csv(silver_csv_path)
-    print(f"Loaded {len(df)} rows with {len(df.columns)} columns.")
-
+def transform_chunk(df_chunk, is_fitting_pass=False):
+    """
+    Applies all transformations to convert a raw silver chunk into a gold-ready feature set.
+    """
     # --- 1. Separate Target Variable ---
-    TARGET_COL = 'outcome'
-    if TARGET_COL not in df.columns:
-        raise ValueError(f"Target column '{TARGET_COL}' not found in the silver data!")
-    
-    y = df[TARGET_COL].apply(lambda x: 1 if x == 'win' else 0)
-    features_df = df.drop(columns=[TARGET_COL])
+    y_chunk = df_chunk['outcome'].apply(lambda x: 1 if x == 'win' else 0)
+    features_df = df_chunk.drop(columns=['outcome'])
 
     # --- 2. Transform Absolute Price Features into Relational Features ---
-    print("Transforming absolute price features into normalized relational features...")
-    
-    # Patterns to identify columns that hold absolute price values
     abs_price_patterns = [
-        r'^(open|high|low|close)$',
-        r'^SMA_\d+$',
-        r'^EMA_\d+$',
-        r'^BB_(upper|lower)$', # BB_width is already a ratio, so we exclude it
-        r'^(support|resistance)$',
-        r'^ATR_level_.+$'
+        r'^(open|high|low|close)$', r'^SMA_\d+$', r'^EMA_\d+$',
+        r'^BB_(upper|lower)$', r'^(support|resistance)$', r'^ATR_level_.+$'
     ]
-    
     abs_price_cols = []
     for pattern in abs_price_patterns:
         regex = re.compile(pattern)
         abs_price_cols.extend([col for col in features_df.columns if regex.match(col)])
-        
-    # Ensure 'close' is present for the calculation
-    if 'close' not in features_df.columns:
-        raise ValueError("'close' column is required for normalization but not found.")
-
-    # Create new relational columns
-    for col in abs_price_cols:
-        # We don't need to create a relational version of 'close' to itself
-        if col == 'close':
-            continue
-        # The new feature is the normalized distance from the closing price
-        features_df[f'{col}_dist_norm'] = (features_df['close'] - features_df[col]) / features_df['close']
-
-    print(f"Created {len(abs_price_cols) - 1} new relational features.")
+    
+    if 'close' in features_df.columns:
+        # Use .copy() to avoid SettingWithCopyWarning
+        close_series = features_df['close'].copy()
+        for col in abs_price_cols:
+            if col != 'close':
+                # Ensure the division is safe from zero-division errors
+                features_df.loc[:, f'{col}_dist_norm'] = (close_series - features_df[col]) / close_series.replace(0, np.nan)
 
     # --- 3. Drop Original and Unnecessary Columns ---
-    # Now that we have the relational features, we can drop the originals
-    # Also drop other identifiers that are not useful for the model
     cols_to_drop = abs_price_cols + ['entry_time', 'exit_time', 'entry_price', 'sl_price', 'tp_price', 'volume']
-    
-    original_feature_count = len(features_df.columns)
     features_df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
-    print(f"Dropped {original_feature_count - len(features_df.columns)} original absolute price and identifier columns.")
 
-    # --- 4. Identify and Process Remaining Column Types ---
+    # --- 4. Process Categorical, Candle, and Numeric Features ---
+    categorical_cols_defs = {
+        'trade_type': ['buy', 'sell'],
+        'session': ['Asian', 'London', 'London_NY_Overlap', 'New_York'],
+        'trend_regime': ['trend', 'range'],
+        'vol_regime': ['high_vol', 'low_vol']
+    }
+    for col, categories in categorical_cols_defs.items():
+        if col in features_df.columns:
+            features_df[col] = pd.Categorical(features_df[col], categories=categories)
+    features_df = pd.get_dummies(features_df, drop_first=True)
+
     candle_cols = [col for col in features_df.columns if col.startswith("CDL")]
-    categorical_cols = ['trade_type', 'session', 'trend_regime', 'vol_regime']
-    categorical_cols = [col for col in categorical_cols if col in features_df.columns]
-    
-    numeric_cols = list(features_df.select_dtypes(include=np.number).columns.difference(candle_cols))
-
-    print(f"Found {len(numeric_cols)} numeric, {len(categorical_cols)} categorical, and {len(candle_cols)} candle pattern features to process.")
-
-    # --- 5. Process Categorical, Candle, and Numeric Features ---
-    if categorical_cols:
-        print("Applying One-Hot Encoding to categorical features...")
-        features_df = pd.get_dummies(features_df, columns=categorical_cols, drop_first=True)
-
     def compress_pattern(v):
         if v >= 80: return 1.0
         elif v > 0: return 0.5
@@ -101,37 +70,78 @@ def create_gold_data(
         else: return 0.0
 
     if candle_cols:
-        print("Compressing candlestick pattern features...")
         for col in candle_cols:
             features_df[col] = features_df[col].fillna(0).apply(compress_pattern)
+            
+    # Return features and target separately
+    return features_df, y_chunk
 
-    # Re-identify numeric columns after one-hot encoding, as dtypes might change
-    numeric_cols_final = list(features_df.select_dtypes(include=np.number).columns)
-    if numeric_cols_final:
-        print(f"Applying StandardScaler to all {len(numeric_cols_final)} numeric features...")
-        scaler = StandardScaler()
-        features_df[numeric_cols_final] = scaler.fit_transform(features_df[numeric_cols_final])
-
-    # --- 6. Combine and Save the Gold Dataset ---
-    gold_df = pd.concat([features_df, y], axis=1)
+def process_silver_to_gold(silver_path, gold_path):
+    """
+    Orchestrates the two-pass, chunk-based processing of a single silver file.
+    """
+    print(f"\n{'='*25}\nProcessing: {os.path.basename(silver_path)}\n{'='*25}")
     
-    os.makedirs(output_dir, exist_ok=True)
-    base_name = os.path.basename(silver_csv_path)
-    out_path = os.path.join(output_dir, f"gold_{base_name}")
-    
-    gold_df.to_csv(out_path, index=False)
+    # --- Pass 1: Fit the Scaler ---
+    print("Pass 1: Fitting scaler on transformed data...")
+    scaler = StandardScaler()
+    final_feature_columns = []
 
-    print("\n" + "="*50)
-    print(f"✅ Success! Normalized 'Gold' data saved to: {out_path}")
-    print(f"💡 This dataset is now fully preprocessed and ready for model training.")
-    print("="*50)
+    chunk_iterator = pd.read_csv(silver_path, chunksize=GOLD_CHUNK_SIZE)
+    for chunk in tqdm(chunk_iterator, desc="Fitting Scaler"):
+        features_transformed, _ = transform_chunk(chunk)
+        numeric_cols = features_transformed.select_dtypes(include=np.number).columns
+        scaler.partial_fit(features_transformed[numeric_cols].fillna(0))
+        if not final_feature_columns:
+            final_feature_columns = list(features_transformed.columns)
 
-    return out_path
+    # --- Pass 2: Transform and Save the Data ---
+    print("\nPass 2: Transforming data and saving to gold file...")
+    chunk_iterator = pd.read_csv(silver_path, chunksize=GOLD_CHUNK_SIZE)
+    is_first_chunk = True
+
+    if os.path.exists(gold_path):
+        os.remove(gold_path)
+
+    for chunk in tqdm(chunk_iterator, desc="Transforming Chunks"):
+        features_transformed, y_transformed = transform_chunk(chunk)
+        numeric_cols = features_transformed.select_dtypes(include=np.number).columns
+        features_transformed.loc[:, numeric_cols] = scaler.transform(features_transformed[numeric_cols].fillna(0))
+        
+        features_aligned = features_transformed.reindex(columns=final_feature_columns, fill_value=0)
+        
+        # Combine with target
+        processed_chunk = pd.concat([features_aligned, y_transformed], axis=1)
+        
+        # --- KEY FIX: Downcast dtypes to reduce file size ---
+        processed_chunk = downcast_dtypes(processed_chunk)
+        
+        processed_chunk.to_csv(gold_path, mode='a', header=is_first_chunk, index=False)
+        is_first_chunk = False
+
+    print(f"\n✅ Success! Normalized and size-optimized 'Gold' data saved to: {gold_path}")
 
 if __name__ == "__main__":
-    # This makes the script easy to run directly.
-    # It will look for 'AUDUSD1.csv' in the silver_data folder.
-    # You can change this to any other file you want to process.
-    silver_file = "../silver_data/AUDUSD1.csv"
+    core_dir = os.path.dirname(os.path.abspath(__file__))
+    silver_dir = os.path.abspath(os.path.join(core_dir, '..', 'silver_data'))
+    gold_dir = os.path.abspath(os.path.join(core_dir, '..', 'gold_data'))
     
-    create_gold_data(silver_csv_path=silver_file)
+    os.makedirs(gold_dir, exist_ok=True)
+    silver_files = [f for f in os.listdir(silver_dir) if f.endswith('.csv')]
+
+    if not silver_files:
+        print("❌ No silver files found to process in the 'silver_data' directory.")
+    else:
+        print(f"Found {len(silver_files)} silver file(s) to process.")
+        for fname in silver_files:
+            silver_path = os.path.join(silver_dir, fname)
+            gold_path = os.path.join(gold_dir, fname)
+            
+            try:
+                process_silver_to_gold(silver_path, gold_path)
+            except Exception as e:
+                print(f"\n❌ FAILED to process {fname}. Error: {e}")
+                import traceback
+                traceback.print_exc()
+
+    print("\n" + "="*50 + "\n✅ All gold data generation complete.")
