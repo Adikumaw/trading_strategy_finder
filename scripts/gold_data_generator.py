@@ -75,23 +75,30 @@ def process_silver_to_gold(silver_path, gold_path):
     print(f"\n{'='*25}\nProcessing: {os.path.basename(silver_path)}\n{'='*25}")
     
     # --- Pass 1: Fit the Scaler and determine final column structure ---
-    print("Pass 1: Fitting scaler on transformed data...")
+    print("Pass 1: Fitting scaler and determining final column structure...")
     scaler = StandardScaler()
-    final_feature_columns = None
+    final_all_columns = None
     numeric_columns_to_scale = None
-    candle_columns_final = None
-
+    
     chunk_iterator = pd.read_csv(silver_path, chunksize=GOLD_CHUNK_SIZE)
     for chunk in tqdm(chunk_iterator, desc="Fitting Scaler"):
         features_transformed, _ = transform_chunk(chunk)
         
-        if final_feature_columns is None:
-            final_feature_columns = list(features_transformed.columns)
-            candle_columns_final = [col for col in final_feature_columns if col.startswith("CDL")]
-            numeric_columns_to_scale = list(
-                features_transformed.select_dtypes(include=np.number).columns.difference(candle_columns_final)
-            )
+        # On the first chunk, determine all final column names and types
+        if final_all_columns is None:
+            final_all_columns = list(features_transformed.columns)
+            
+            # Define one-hot columns based on their prefixes/suffixes
+            one_hot_cols = [col for col in final_all_columns if any(
+                s in col for s in ['trade_type_', 'session_', 'trend_regime_', 'vol_regime_']
+            )]
+            candle_cols = [col for col in final_all_columns if col.startswith("CDL")]
+            
+            # Numeric columns are everything else
+            non_scalable_cols = set(one_hot_cols + candle_cols)
+            numeric_columns_to_scale = [col for col in final_all_columns if col not in non_scalable_cols and col in features_transformed.select_dtypes(include=np.number).columns]
 
+        # Ensure numeric columns exist and fit the scaler
         numeric_chunk = features_transformed.reindex(columns=numeric_columns_to_scale, fill_value=0)
         scaler.partial_fit(numeric_chunk.fillna(0))
 
@@ -106,22 +113,22 @@ def process_silver_to_gold(silver_path, gold_path):
     for chunk in tqdm(chunk_iterator, desc="Transforming Chunks"):
         features_transformed, y_transformed = transform_chunk(chunk)
         
-        # --- KEY FIX: Rebuild the DataFrame to avoid FutureWarning ---
-        # 1. Separate the numeric features to be scaled from the unscaled candle features
+        # --- KEY FIX: Isolate, Scale, and Recombine all feature types ---
+        # 1. Isolate the numeric features that need scaling
         numeric_to_scale_df = features_transformed.reindex(columns=numeric_columns_to_scale, fill_value=0)
-        candle_features_df = features_transformed.reindex(columns=candle_columns_final, fill_value=0)
         
-        # 2. Scale the numeric data and create a brand new DataFrame from it
+        # 2. Isolate the features that should NOT be scaled (candles and one-hot)
+        non_scaled_features_df = features_transformed.reindex(columns=[c for c in final_all_columns if c not in numeric_columns_to_scale], fill_value=0)
+        
+        # 3. Scale the numeric data and create a new, correctly-typed DataFrame
         scaled_data = scaler.transform(numeric_to_scale_df.fillna(0))
         scaled_df = pd.DataFrame(scaled_data, index=features_transformed.index, columns=numeric_columns_to_scale)
         
-        # 3. Combine the scaled numeric features and the unscaled candle features
-        final_features = pd.concat([scaled_df, candle_features_df], axis=1)
+        # 4. Combine the scaled numeric features with the unscaled features
+        final_features = pd.concat([scaled_df, non_scaled_features_df], axis=1)
         
-        # 4. Align to the final column order to handle any discrepancies between chunks
-        features_aligned = final_features.reindex(columns=final_feature_columns, fill_value=0)
-        
-        # 5. Combine with target
+        # 5. Align to the final column order and combine with the target
+        features_aligned = final_features.reindex(columns=final_all_columns, fill_value=0)
         processed_chunk = pd.concat([features_aligned, y_transformed], axis=1)
         
         # 6. Downcast and save
