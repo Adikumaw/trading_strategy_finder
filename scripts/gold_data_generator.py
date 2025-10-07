@@ -6,12 +6,11 @@ import re
 from tqdm import tqdm
 
 # --- CONFIGURATION ---
-GOLD_CHUNK_SIZE = 1_000_000  # How many rows to process at a time to manage memory
+GOLD_CHUNK_SIZE = 500_000  # How many rows to process at a time to manage memory
 
 def downcast_dtypes(df):
     """
     Downcasts numeric columns to more memory-efficient types (float32).
-    This is the key to reducing the final file size.
     """
     for col in df.select_dtypes(include=['float64']).columns:
         df[col] = df[col].astype('float32')
@@ -19,15 +18,13 @@ def downcast_dtypes(df):
         df[col] = df[col].astype('int32')
     return df
 
-def transform_chunk(df_chunk, is_fitting_pass=False):
+def transform_chunk(df_chunk):
     """
     Applies all transformations to convert a raw silver chunk into a gold-ready feature set.
     """
-    # --- 1. Separate Target Variable ---
-    y_chunk = df_chunk['outcome'].apply(lambda x: 1 if x == 'win' else 0)
-    features_df = df_chunk.drop(columns=['outcome'])
+    features_df = df_chunk.copy()
+    y_chunk = features_df.pop('outcome').apply(lambda x: 1 if x == 'win' else 0)
 
-    # --- 2. Transform Absolute Price Features into Relational Features ---
     abs_price_patterns = [
         r'^(open|high|low|close)$', r'^SMA_\d+$', r'^EMA_\d+$',
         r'^BB_(upper|lower)$', r'^(support|resistance)$', r'^ATR_level_.+$'
@@ -38,18 +35,14 @@ def transform_chunk(df_chunk, is_fitting_pass=False):
         abs_price_cols.extend([col for col in features_df.columns if regex.match(col)])
     
     if 'close' in features_df.columns:
-        # Use .copy() to avoid SettingWithCopyWarning
-        close_series = features_df['close'].copy()
+        close_series = features_df['close']
         for col in abs_price_cols:
             if col != 'close':
-                # Ensure the division is safe from zero-division errors
-                features_df.loc[:, f'{col}_dist_norm'] = (close_series - features_df[col]) / close_series.replace(0, np.nan)
+                features_df[f'{col}_dist_norm'] = (close_series - features_df[col]) / close_series.replace(0, np.nan)
 
-    # --- 3. Drop Original and Unnecessary Columns ---
     cols_to_drop = abs_price_cols + ['entry_time', 'exit_time', 'entry_price', 'sl_price', 'tp_price', 'volume']
     features_df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
 
-    # --- 4. Process Categorical, Candle, and Numeric Features ---
     categorical_cols_defs = {
         'trade_type': ['buy', 'sell'],
         'session': ['Asian', 'London', 'London_NY_Overlap', 'New_York'],
@@ -73,7 +66,6 @@ def transform_chunk(df_chunk, is_fitting_pass=False):
         for col in candle_cols:
             features_df[col] = features_df[col].fillna(0).apply(compress_pattern)
             
-    # Return features and target separately
     return features_df, y_chunk
 
 def process_silver_to_gold(silver_path, gold_path):
@@ -82,18 +74,26 @@ def process_silver_to_gold(silver_path, gold_path):
     """
     print(f"\n{'='*25}\nProcessing: {os.path.basename(silver_path)}\n{'='*25}")
     
-    # --- Pass 1: Fit the Scaler ---
+    # --- Pass 1: Fit the Scaler and determine final column structure ---
     print("Pass 1: Fitting scaler on transformed data...")
     scaler = StandardScaler()
-    final_feature_columns = []
+    final_feature_columns = None
+    numeric_columns_to_scale = None
+    candle_columns_final = None
 
     chunk_iterator = pd.read_csv(silver_path, chunksize=GOLD_CHUNK_SIZE)
     for chunk in tqdm(chunk_iterator, desc="Fitting Scaler"):
         features_transformed, _ = transform_chunk(chunk)
-        numeric_cols = features_transformed.select_dtypes(include=np.number).columns
-        scaler.partial_fit(features_transformed[numeric_cols].fillna(0))
-        if not final_feature_columns:
+        
+        if final_feature_columns is None:
             final_feature_columns = list(features_transformed.columns)
+            candle_columns_final = [col for col in final_feature_columns if col.startswith("CDL")]
+            numeric_columns_to_scale = list(
+                features_transformed.select_dtypes(include=np.number).columns.difference(candle_columns_final)
+            )
+
+        numeric_chunk = features_transformed.reindex(columns=numeric_columns_to_scale, fill_value=0)
+        scaler.partial_fit(numeric_chunk.fillna(0))
 
     # --- Pass 2: Transform and Save the Data ---
     print("\nPass 2: Transforming data and saving to gold file...")
@@ -105,17 +105,27 @@ def process_silver_to_gold(silver_path, gold_path):
 
     for chunk in tqdm(chunk_iterator, desc="Transforming Chunks"):
         features_transformed, y_transformed = transform_chunk(chunk)
-        numeric_cols = features_transformed.select_dtypes(include=np.number).columns
-        features_transformed.loc[:, numeric_cols] = scaler.transform(features_transformed[numeric_cols].fillna(0))
         
-        features_aligned = features_transformed.reindex(columns=final_feature_columns, fill_value=0)
+        # --- KEY FIX: Rebuild the DataFrame to avoid FutureWarning ---
+        # 1. Separate the numeric features to be scaled from the unscaled candle features
+        numeric_to_scale_df = features_transformed.reindex(columns=numeric_columns_to_scale, fill_value=0)
+        candle_features_df = features_transformed.reindex(columns=candle_columns_final, fill_value=0)
         
-        # Combine with target
+        # 2. Scale the numeric data and create a brand new DataFrame from it
+        scaled_data = scaler.transform(numeric_to_scale_df.fillna(0))
+        scaled_df = pd.DataFrame(scaled_data, index=features_transformed.index, columns=numeric_columns_to_scale)
+        
+        # 3. Combine the scaled numeric features and the unscaled candle features
+        final_features = pd.concat([scaled_df, candle_features_df], axis=1)
+        
+        # 4. Align to the final column order to handle any discrepancies between chunks
+        features_aligned = final_features.reindex(columns=final_feature_columns, fill_value=0)
+        
+        # 5. Combine with target
         processed_chunk = pd.concat([features_aligned, y_transformed], axis=1)
         
-        # --- KEY FIX: Downcast dtypes to reduce file size ---
+        # 6. Downcast and save
         processed_chunk = downcast_dtypes(processed_chunk)
-        
         processed_chunk.to_csv(gold_path, mode='a', header=is_first_chunk, index=False)
         is_first_chunk = False
 
