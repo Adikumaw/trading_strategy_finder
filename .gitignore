@@ -15,3 +15,6 @@ test_data/*
 
 # Ignore gold data files
 gold_data/*
+
+# Ignore any csv under the main directory only
+/*.csv
