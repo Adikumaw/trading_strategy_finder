@@ -1,40 +1,52 @@
-# 🧠 Silver Data Generator (AI Feature Enrichment Pipeline)
+# 🧠 Silver Data Generator (Decoupled Feature & Outcome Engine)
 
-This Python script transforms the basic trade simulations from the **"Bronze Dataset"** into a feature-rich **"Silver Dataset"** ready for advanced machine learning analysis. It acts as the critical bridge between raw trade outcomes and intelligent strategy discovery.
+This Python script is a critical architectural component that transforms raw market data and trade simulations into a clean, efficient, and logically sound **"Silver Dataset"**. It is designed to prevent data leakage and prepare the ground for robust machine learning analysis.
 
-The script's core purpose is to enrich each simulated trade with a deep snapshot of the market's context at the moment of entry, asking: **_What was the market doing and looking like when this trade was initiated?_**
+The script's core purpose is to **decouple the market context (features) from the trade results (outcomes)**. This fixes a major logical flaw where a single market event could be over-represented, leading to biased and unreliable models.
 
 ---
 
 ## ⚙️ How It Works
 
-1.  **Matching Files:** The script finds corresponding files in `raw_data/` and `bronze_data/` (e.g., `EURUSD1.csv` in both).
-2.  **Historical Feature Calculation:** It first loads the entire `raw_data` (OHLCV) file to calculate a vast array of historical technical indicators and patterns. This is done once per file and cached in memory for efficiency.
-3.  **Chunk Processing:** It reads the potentially massive `bronze_data` file in manageable chunks to avoid memory overload.
-4.  **Contextual Merging:** For each trade in a chunk, it looks up the `entry_time` and merges the entire pre-calculated market context (all indicators, patterns, etc.) onto that trade's row.
-5.  **Relational Feature Generation:** This is the script's most powerful step. After merging, it calculates **new relational features** that describe where the trade's Stop-Loss (SL) and Take-Profit (TP) levels are positioned relative to key market structures (like Support/Resistance, Bollinger Bands, and moving averages).
-6.  **Saving the Silver Dataset:** The final, enriched data for each file is appended to a new CSV in the `silver_data/` directory.
+This script follows a two-step process to create two distinct, synchronized datasets:
+
+1.  **Step 1: Generate a `features` Dataset:**
+
+    -   It scans for a `raw_data` file (e.g., `AUDUSD1.csv`).
+    -   It loads the entire historical OHLCV data.
+    -   It calculates a comprehensive set of over 200 market features (indicators, patterns, etc.) for **every single candle**.
+    -   After removing the initial indicator warmup period, it saves this clean, non-duplicated data to `silver_data/features/`. Each row in this file represents the unique state of the market at one point in time.
+
+2.  **Step 2: Generate an `outcomes` Dataset:**
+    -   It finds the corresponding `bronze_data` file.
+    -   It reads the massive trade simulation file in memory-efficient chunks.
+    -   It **filters** these trades, keeping only those whose `entry_time` occurs on or after the first available timestamp in the `features` dataset. This synchronizes the two files.
+    -   It saves the filtered trade results to `silver_data/outcomes/`.
+
+This creates a powerful **one-to-many relationship**, where the `time` column in the `features` file acts as a unique key to link one set of market conditions to the many possible trade outcomes in the `outcomes` file.
 
 ---
 
-## 📁 Folder Structure
+## 📁 New Folder Structure
 
-This script consumes data from `raw_data` and `bronze_data` to produce its output in `silver_data`.
+The script now produces a structured output within the `silver_data` directory, separating market context from trade results.
 
 ```
 project_root/
 │
 ├── raw_data/             # INPUT: Raw OHLCV data (no header)
-│   ├── EURUSD1.csv
-│   └── ...
+│   └── AUDUSD1.csv
 │
 ├── bronze_data/          # INPUT: Trade simulations from the bronze script
-│   ├── EURUSD1.csv
-│   └── ...
+│   └── AUDUSD1.csv
 │
-├── silver_data/          # OUTPUT: ML-ready enriched datasets (auto-created)
-│   ├── EURUSD1.csv
-│   └── ...
+├── silver_data/          # OUTPUT: Parent directory for decoupled data
+│   │
+│   ├── features/         # OUTPUT 1: Unique market features, one row per candle
+│   │   └── AUDUSD1.csv
+│   │
+│   └── outcomes/         # OUTPUT 2: All trade outcomes, many rows per candle
+│       └── AUDUSD1.csv
 │
 └── scripts/
     └── silver_data_generator.py   # This script
@@ -42,69 +54,33 @@ project_root/
 
 ---
 
-## 🧩 Input Data Format
-
-The script requires two input files for each instrument:
-
-1.  **`bronze_data/{instrument}.csv`**:
-    -   Must contain a header row.
-    -   Expected columns include `entry_time`, `sl_price`, `tp_price`, etc.
-2.  **`raw_data/{instrument}.csv`**:
-    -   Must **NOT** contain a header row.
-    -   Expected columns are `time, open, high, low, close, [volume]`.
-
-The script will fail if the corresponding raw data file for a bronze file is missing.
-
----
-
 ## 🚀 Feature Engineering Engine
 
-This script is a comprehensive feature generation powerhouse. For every single trade, it calculates:
+This script generates a rich set of market features for **every candle**, ensuring you have a complete basis for discovering any possible strategy. The features are calculated in efficient batches to optimize performance.
 
 | Feature Category           | Examples                                                                      | Purpose                                                                 |
 | :------------------------- | :---------------------------------------------------------------------------- | :---------------------------------------------------------------------- |
 | **Technical Indicators**   | `SMA`, `EMA`, `RSI`, `MACD`, `Bollinger Bands`, `ATR`, `ADX`, `CCI`, `OBV`    | Quantify market momentum, trend, volatility, and volume dynamics.       |
-| **Candlestick Patterns**   | `CDLDOJI`, `CDLENGULFING`, `CDLHAMMER`, etc. (Dozens from `talib`)            | Capture classic price action signals and potential reversals.           |
+| **Candlestick Patterns**   | `CDLDOJI`, `CDLENGULFING`, `CDLHAMMER`, etc. (All 61 from `talib`)            | Capture classic price action signals and potential reversals.           |
 | **Support & Resistance**   | `support`, `resistance` (calculated with a fast, Numba-accelerated algorithm) | Identify key historical price levels that might influence future price. |
 | **Price Action & Regimes** | `bullish_ratio_last_N`, `avg_body_last_N`, `trend_regime`, `vol_regime`       | Characterize recent price behavior and the overall market state.        |
 | **Time-Based Features**    | `session` (Asian, London, NY), `hour`, `weekday`                              | Allow the model to find patterns related to time of day or week.        |
 
 ---
 
-## ✨ The Secret Sauce: Relational Features
-
-Beyond standard indicators, this script generates novel features that give a model true market structure awareness. Instead of just knowing a trade's SL/TP ratio, the model learns **where the SL and TP are placed in relation to the market.**
-
-This helps answer critical questions like:
-
--   _Is the Stop Loss safely behind a strong support level or exposed in open space?_
--   _Is the Take Profit aiming for a realistic target just before a resistance level, or is it unlikely to be hit?_
--   _How far is the TP from the upper Bollinger Band?_
-
-#### Example Generated Features:
-
--   `sl_dist_to_support_norm`
--   `tp_dist_to_resistance_norm`
--   `sl_dist_to_bb_upper_norm`
--   `tp_dist_to_sma_50_norm`
--   ...and many more for all key indicators.
-
-These features are **normalized by the closing price**, making them comparable across different assets and timeframes.
-
----
-
 ## ⚡ Performance & Efficiency
 
--   **Chunking:** Processes massive bronze files in `1,000,000` row chunks to operate on systems with limited RAM.
--   **Indicator Warmup:** Skips the first `200` candles of historical data to ensure that indicators have enough data to produce stable, meaningful values.
--   **Numba JIT Compilation:** The Support and Resistance algorithm is accelerated with Numba for high-speed calculation on large datasets.
--   **Downcasting:** Automatically reduces the memory footprint of the final dataset by downcasting data types (e.g., `float64` to `float32`).
+-   **Efficient Feature Calculation:** Features are computed in optimized batches and concatenated in a single operation to avoid memory fragmentation and improve speed.
+-   **Chunking for Outcomes:** The script processes the massive bronze data file in chunks to generate the outcomes file, ensuring it can run on systems with limited RAM.
+-   **Indicator Warmup:** Skips the first `200` candles of historical data to ensure all indicators are based on stable, meaningful values.
+-   **Numba JIT Compilation:** The Support and Resistance algorithm is accelerated with Numba for high-speed calculation.
+-   **Downcasting:** Automatically reduces the memory footprint of the final `features` dataset by downcasting data types.
 
 ---
 
 ## 🧮 Example Workflow
 
-1.  **Prerequisite:** Ensure you have already run `bronze_data_generator.py` and have populated the `bronze_data` folder.
+1.  **Prerequisite:** Ensure you have already run `bronze_data_generator.py`.
 
 2.  **Run the script:**
 
@@ -112,72 +88,62 @@ These features are **normalized by the closing price**, making them comparable a
     python scripts/silver_data_generator.py
     ```
 
-3.  **Monitor the output:** The script will process each file pair it finds.
+3.  **Monitor the output:**
 
     ```
     =========================
     Processing: AUDUSD1.csv
     =========================
-    Loading raw OHLCV to determine indicator warmup period...
-    Calculating all historical features...
-    ✅ Historical features calculated and cached in memory.
+    STEP 1: Creating Silver Features dataset (unique per candle)...
     ...
-    Merging Bronze Chunks: 100%|██████████| 5/5 [00:30<00:00, 6.00s/it]
+    ✅ Silver Features saved to: silver_data\features\AUDUSD1.csv (99800 rows)
 
-    ✅ Success! Rich dataset with all chunks merged saved to AUDUSD1.csv
+    STEP 2: Creating Silver Outcomes dataset (from bronze data)...
+    ...
+    ✅ Silver Outcomes saved to: silver_data\outcomes\AUDUSD1.csv
     ```
-
-4.  **Final Output:** The `silver_data` folder will now contain CSVs with a massive number of columns, ready for analysis.
 
 ---
 
 ## 🧱 Output File Description
 
-Each output CSV in `silver_data/` is an extremely wide file containing every column from the original bronze data file, plus dozens of new feature columns.
+The script generates two distinct and crucial files for each instrument.
 
-**Structure:** `[Original Bronze Columns] + [Market Data Columns] + [Indicator Columns] + [Pattern Columns] + [Relational Feature Columns]`
+### 1. `silver_data/features/{instrument}.csv`
 
-#### A Sample of Added Columns:
+This file contains the complete market context. It has **one row for every candle** and a very large number of columns.
 
-| Column                                                                    | Description                                                                |
-| :------------------------------------------------------------------------ | :------------------------------------------------------------------------- |
-| `open`, `high`, `low`, `close`                                            | The OHLC of the entry candle.                                              |
-| `volume`                                                                  | Volume of the entry candle.                                                |
-| `SMA_20`, `SMA_50`, `SMA_100`, `SMA_200`                                  | Simple Moving Averages for trend detection.                                |
-| `EMA_8`, `EMA_13`, `EMA_21`, `EMA_50`                                     | Exponential Moving Averages for shorter-term trend tracking.               |
-| `RSI_14`                                                                  | Relative Strength Index for momentum.                                      |
-| `MACD_hist`                                                               | MACD histogram for trend strength.                                         |
-| `BB_upper`, `BB_lower`, `BB_width`                                        | Bollinger Bands for volatility and price envelope.                         |
-| `ATR_14`                                                                  | Average True Range for market volatility.                                  |
-| `ADX`                                                                     | Average Directional Index for trend strength.                              |
-| `MOM_10`, `CCI_20`                                                        | Momentum and Commodity Channel Index indicators.                           |
-| `OBV`                                                                     | On-Balance Volume indicator.                                               |
-| `CDL2CROWS`, `CDL3BLACKCROWS`, `CDL3INSIDE`, `CDLENGULFING`, `CDLDOJI`, … | Classic candlestick pattern flags from TA-Lib.                             |
-| `support`, `resistance`                                                   | Key historical support and resistance levels.                              |
-| `session`, `hour`, `weekday`                                              | Time-based features to detect session/weekday effects.                     |
-| `bullish_ratio_last_3`, `avg_body_last_3`, `avg_range_last_3`             | Rolling price action stats (last 3 candles).                               |
-| `bullish_ratio_last_5`, `avg_body_last_5`, …                              | Rolling stats for last 5, 10, 20, 50 candles.                              |
-| `close_SMA20_ratio_3`, `EMA8_EMA21_ratio_3`, …                            | Relative ratios to moving averages for trend context.                      |
-| `trend_regime`                                                            | Market trend regime based on ADX (`trend` or `range`).                     |
-| `vol_regime`                                                              | Volatility regime based on ATR (`high_vol` or `low_vol`).                  |
-| `sl_dist_to_support_norm`, `tp_dist_to_support_norm`                      | Normalized SL/TP distance to support level.                                |
-| `sl_dist_to_resistance_norm`, `tp_dist_to_resistance_norm`                | Normalized SL/TP distance to resistance level.                             |
-| `sl_dist_to_bb_upper_norm`, `tp_dist_to_bb_upper_norm`                    | Normalized SL/TP distance to upper Bollinger Band.                         |
-| `sl_dist_to_bb_lower_norm`, `tp_dist_to_bb_lower_norm`                    | Normalized SL/TP distance to lower Bollinger Band.                         |
-| `sl_dist_to_sma_20_norm`, `tp_dist_to_sma_20_norm`                        | Normalized SL/TP distance to SMA 20.                                       |
-| `sl_dist_to_sma_50_norm`, `tp_dist_to_sma_50_norm`                        | Normalized SL/TP distance to SMA 50.                                       |
-| `sl_dist_to_sma_100_norm`, `tp_dist_to_sma_100_norm`                      | Normalized SL/TP distance to SMA 100.                                      |
-| `sl_dist_to_sma_200_norm`, `tp_dist_to_sma_200_norm`                      | Normalized SL/TP distance to SMA 200.                                      |
-| `sl_dist_to_ema_8_norm`, `tp_dist_to_ema_8_norm`                          | Normalized SL/TP distance to EMA 8.                                        |
-| `sl_dist_to_ema_13_norm`, `tp_dist_to_ema_13_norm`                        | Normalized SL/TP distance to EMA 13.                                       |
-| `sl_dist_to_ema_21_norm`, `tp_dist_to_ema_21_norm`                        | Normalized SL/TP distance to EMA 21.                                       |
-| `sl_dist_to_ema_50_norm`, `tp_dist_to_ema_50_norm`                        | Normalized SL/TP distance to EMA 50.                                       |
-| `sl_dist_to_atr_up_1x_norm`, `tp_dist_to_atr_up_1x_norm`                  | Normalized SL/TP distance to ATR-based dynamic upper level.                |
-| `sl_dist_to_atr_down_1x_norm`, `tp_dist_to_atr_down_1x_norm`              | Normalized SL/TP distance to ATR-based dynamic lower level.                |
-| …and over 50+ more columns                                                | Additional candlestick patterns, rolling features, and relational metrics. |
+| Column Category                          | Description                                                               |
+| :--------------------------------------- | :------------------------------------------------------------------------ |
+| `time`                                   | **Unique Key.** The timestamp of the candle.                              |
+| `open`, `high`, `low`, `close`, `volume` | The core OHLCV data for the candle.                                       |
+| **Indicator Columns**                    | `SMA_20`, `EMA_8`, `RSI_14`, `BB_width`, `ADX`, `MACD_hist`, etc.         |
+| **Candlestick Columns**                  | `CDLDOJI`, `CDLHAMMER`, etc. A column for each of the 61 TA-Lib patterns. |
+| **S/R Columns**                          | `support`, `resistance`. The last known support/resistance levels.        |
+| **Time Columns**                         | `session`, `hour`, `weekday`.                                             |
+| **Price Action Columns**                 | `bullish_ratio_last_3`, `avg_body_last_10`, `close_SMA20_ratio_50`, etc.  |
+| **Regime Columns**                       | `trend_regime`, `vol_regime`.                                             |
+
+### 2. `silver_data/outcomes/{instrument}.csv`
+
+This file contains all the simulated trade results from the Bronze layer, synchronized with the features file. It can have **many rows for every candle**.
+
+| Column                 | Description                                                                              |
+| :--------------------- | :--------------------------------------------------------------------------------------- |
+| `entry_time`           | **Foreign Key.** The timestamp of the trade entry. Links to `time` in the features file. |
+| `trade_type`           | “buy” or “sell”.                                                                         |
+| `entry_price`          | Entry price at candle close.                                                             |
+| `sl_price`, `tp_price` | Stop-loss and Take-profit price levels.                                                  |
+| `sl_ratio`, `tp_ratio` | The relative SL/TP percentages used for this trade.                                      |
+| `exit_time`            | The timestamp when the trade concluded.                                                  |
+| `outcome`              | "win" (or "loss" if the bronze script generates them).                                   |
 
 ---
 
 ## 📈 Example Use Case
 
-The silver dataset is the ideal input for training supervised machine learning models (e.g., RandomForest, XGBoost, Neural Networks) to predict the `outcome` ('win' or 'loss') of a trade based on the rich market context provided.
+These two decoupled files are the **correct** inputs for the next stage of the pipeline (`gold_data_generator.py`). The next script will:
+
+1.  Load the `outcomes.csv` to calculate a **win rate for each `entry_time`**.
+2.  Join this win rate onto the `features.csv` using the `time` and `entry_time` columns as the key.
+3.  This creates a clean dataset for training a model to predict which market conditions lead to a high probability of success, fixing the "one candle, many votes" logical flaw.
