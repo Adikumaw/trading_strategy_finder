@@ -9,6 +9,7 @@ import time
 # --- GLOBAL CONFIGURATION ---
 USE_MULTIPROCESSING = False  # Set to False for running on custom process count for limited testing
 MAX_CPU_USAGE = max(1, cpu_count() - 2)  # Leave 2 cores free for system responsiveness
+CHUNK_SIZE = 1_000_000  # Save data in chunks of 1 million rows to manage memory
 
 # --- Timeframe Presets for SL/TP ---
 # This dictionary remains unchanged.
@@ -63,7 +64,8 @@ def get_config_from_filename(filename):
 
 def process_file(task_id, input_file, output_file, config):
     """
-    Worker function for multiprocessing. It now uses a task_id to position its progress bar.
+    Worker function for multiprocessing. It now uses a task_id to position its progress bar
+    and saves data in chunks to manage memory.
     """
     filename = os.path.basename(input_file)
     
@@ -79,14 +81,17 @@ def process_file(task_id, input_file, output_file, config):
         df["time"] = pd.to_datetime(df["time"])
         df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].apply(pd.to_numeric)
     except Exception as e:
-        # Using a lock or some other method to print safely would be ideal, but for errors it's often okay.
         print(f"❌ Error loading or parsing {filename}: {e}")
         return f"Error: {filename}"
 
     profitable_trades = []
+    total_trades_found = 0
     
-    # MODIFICATION 2: The `position=task_id` argument tells tqdm which line to draw on.
-    # `leave=True` ensures the bar stays on screen after completion.
+    # MODIFICATION: Ensure a clean start by deleting the output file if it exists.
+    # This prevents appending to an old file from a previously failed run.
+    if os.path.exists(output_file):
+        os.remove(output_file)
+
     for i in tqdm(range(len(df) - 1), desc=f"{filename}", position=task_id, leave=True):
         entry_time, entry_price = df.loc[i, "time"], df.loc[i, "close"]
 
@@ -121,12 +126,26 @@ def process_file(task_id, input_file, output_file, config):
                 if hit_sls: sell_sls = {p: r for p, r in sell_sls.items() if p not in hit_sls}
 
             if not buy_sls and not sell_sls: break
-    
-    if not profitable_trades:
+        
+        # MODIFICATION: Check if the profitable_trades list has reached the chunk size.
+        if len(profitable_trades) >= CHUNK_SIZE:
+            chunk_df = pd.DataFrame(profitable_trades)
+            total_trades_found += len(chunk_df)
+            # Append to CSV. Write header only if the file doesn't exist yet (first chunk).
+            chunk_df.to_csv(output_file, mode='a', header=not os.path.exists(output_file), index=False)
+            profitable_trades.clear()  # Clear the list to free up memory
+
+    # MODIFICATION: After the loop, save any remaining trades that didn't fill a whole chunk.
+    if profitable_trades:
+        final_chunk_df = pd.DataFrame(profitable_trades)
+        total_trades_found += len(final_chunk_df)
+        # Append the final chunk. The header logic remains the same.
+        final_chunk_df.to_csv(output_file, mode='a', header=not os.path.exists(output_file), index=False)
+
+    if total_trades_found == 0:
         return f"No trades found for {filename}."
 
-    pd.DataFrame(profitable_trades).to_csv(output_file, index=False)
-    return f"SUCCESS: {len(profitable_trades)} trades found in {filename}."
+    return f"SUCCESS: {total_trades_found} trades found in {filename}."
 
 if __name__ == "__main__":
     start_time = time.time()
@@ -156,16 +175,15 @@ if __name__ == "__main__":
         if use_multiprocessing:
             num_processes = MAX_CPU_USAGE
         else:
-            num_processes = int(input("Enter number of processes to use (1 for single process): ").strip())
             try:
-                if num_processes < 1 or num_processes > MAX_CPU_USAGE:
-                    raise ValueError
+                num_processes = int(input("Enter number of processes to use (1 for single process): ").strip())
+                if num_processes < 1 or num_processes > cpu_count():
+                    raise ValueError("Number of processes out of range.")
             except ValueError:
-                print("Invalid input Or out of range. Defaulting to 1 process.")
+                print("Invalid input or out of range. Defaulting to 1 process.")
                 num_processes = 1
 
         tasks = []
-        # MODIFICATION 3: Use enumerate to add a unique task_id to each task.
         for task_id, filename in enumerate(raw_files):
             config = get_config_from_filename(filename)
             if config:
@@ -179,12 +197,14 @@ if __name__ == "__main__":
             print("❌ No valid files to process after checking configurations.")
         else:
             print("\n" + "="*50)
-            print(f"🚀 Starting multiprocessing pool with {num_processes} workers for {len(tasks)} files.")
+            print(f"🚀 Starting processing with {num_processes} workers for {len(tasks)} files.")
             print("="*50 + "\n")
 
-            with Pool(processes=num_processes) as pool:
-                # MODIFICATION 4: Use `starmap` to pass the multiple arguments from each task tuple.
-                results = pool.starmap(process_file, tasks)
+            if num_processes > 1:
+                with Pool(processes=num_processes) as pool:
+                    results = pool.starmap(process_file, tasks)
+            else: # Run in a single process for easier debugging
+                results = [process_file(*task) for task in tasks]
 
             # Print results after all processes are finished
             print("\n" + "="*50 + "\nProcessing Summary:")
