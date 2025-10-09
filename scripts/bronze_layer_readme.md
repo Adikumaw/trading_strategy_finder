@@ -153,17 +153,19 @@ entry_time,trade_type,entry_price,sl_price,tp_price,sl_ratio,tp_ratio,exit_time,
 
 Each output CSV (`bronze_data/*.csv`) contains:
 
-| Column      | Description                 |
-| ----------- | --------------------------- |
-| entry_time  | Time of trade entry         |
-| trade_type  | "buy" or "sell"             |
-| entry_price | Entry price at candle close |
-| sl_price    | Stop-loss price             |
-| tp_price    | Take-profit price           |
-| sl_ratio    | Relative SL percentage      |
-| tp_ratio    | Relative TP percentage      |
-| exit_time   | Time when TP or SL was hit  |
-| outcome     | "win" if TP hit before SL   |
+| Column      | Description                                           |
+| ----------- | ----------------------------------------------------- |
+| entry_time  | Time of trade entry                                   |
+| trade_type  | "buy" or "sell"                                       |
+| entry_price | Entry price at candle close                           |
+| sl_price    | Stop-loss price                                       |
+| tp_price    | Take-profit price                                     |
+| sl_ratio    | Relative SL percentage                                |
+| tp_ratio    | Relative TP percentage                                |
+| exit_time   | Time when TP or SL was hit                            |
+| outcome     | "win" if TP hit before SL, "loss" if SL hit before TP |
+
+**Note:** This dataset is the direct input for the Silver Layer, which performs advanced feature engineering and outcome enrichment.
 
 ---
 

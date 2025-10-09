@@ -113,28 +113,41 @@ def add_all_market_features(df):
 
     return pd.concat([df] + new_features_list, axis=1)
 
+
 def add_positioning_features(merged_chunk):
     """
-    Calculates the distance from SL/TP to key indicator levels, expressed in basis points (bps).
-    1 basis point = 0.01%.
-    A positive value means the price (SL/TP) is ABOVE the indicator level.
-    A negative value means the price (SL/TP) is BELOW the indicator level.
+    Calculates TWO types of positioning features:
+    1.  _bps: The distance from SL/TP to a level, in basis points.
+    2.  _placement_pct_to: The SL/TP placement as a percentage of the distance from entry to the level.
     """
-    # Identify all possible price levels for positioning
     level_cols = [
         'open', 'high', 'low', 'support', 'resistance',
         'BB_upper', 'BB_lower', 'ATR_level_up_1x', 'ATR_level_down_1x'
     ]
     level_cols.extend([col for col in merged_chunk.columns if 'SMA_' in col or 'EMA_' in col])
     
-    sl, tp, close = merged_chunk['sl_price'], merged_chunk['tp_price'], merged_chunk['close']
+    entry, sl, tp, close = merged_chunk['entry_price'], merged_chunk['sl_price'], merged_chunk['tp_price'], merged_chunk['close']
     
-    for level in level_cols:
-        if level in merged_chunk.columns and not merged_chunk[level].isnull().all():
-            # Calculate distance as a ratio, then scale by 10,000 to get basis points
-            merged_chunk[f'sl_dist_to_{level}_bps'] = ((sl - merged_chunk[level]) / close) * 10000
-            merged_chunk[f'tp_dist_to_{level}_bps'] = ((tp - merged_chunk[level]) / close) * 10000
+    for level_name in level_cols:
+        if level_name in merged_chunk.columns and not merged_chunk[level_name].isnull().all():
+            level_price = merged_chunk[level_name]
             
+            # --- Calculation 1: Distance in Basis Points (Unchanged) ---
+            merged_chunk[f'sl_dist_to_{level_name}_bps'] = ((sl - level_price) / close) * 10000
+            merged_chunk[f'tp_dist_to_{level_name}_bps'] = ((tp - level_price) / close) * 10000
+
+            # --- Calculation 2: Placement as a Percentage ---
+            # Total distance available from entry to the indicator level
+            total_dist_to_level = level_price - entry
+            
+            # Distance covered by the SL/TP placement
+            sl_dist_from_entry = sl - entry
+            tp_dist_from_entry = tp - entry
+
+            # Calculate the percentage, handle division by zero
+            merged_chunk[f'sl_placement_pct_to_{level_name}'] = (sl_dist_from_entry / total_dist_to_level).replace([np.inf, -np.inf], np.nan)
+            merged_chunk[f'tp_placement_pct_to_{level_name}'] = (tp_dist_from_entry / total_dist_to_level).replace([np.inf, -np.inf], np.nan)
+
     return merged_chunk
 
 def create_enriched_silver_data(bronze_path, raw_path, features_path, outcomes_path):

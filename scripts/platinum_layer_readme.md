@@ -8,26 +8,25 @@ Its core purpose is to synthesize the market context from the **Gold Layer** wit
 
 ## 🏛️ Architectural Overview
 
-The Platinum Layer operates in a two-stage process, using two distinct scripts for maximum efficiency and modularity:
+The Platinum Layer operates in a two-stage process:
 
-1.  **`platinum_combinations_generator.py` (The Blueprint Creator):** This script acts as a preliminary scanner. It reads the massive `silver_data/outcomes` file once and extracts every unique _strategy definition_ (e.g., "SL at SMA_50, TP at 0.5% ratio"). It saves this master list of testable "blueprints," preventing redundant work later.
+1.  **`platinum_combinations_generator.py` (The Blueprint Creator):** This script is now a sophisticated scanner that generates advanced strategy "blueprints." It no longer just checks if a SL/TP is _at_ a level, but rather **bins the placement into 10% increments**. It creates blueprints like: _"SL placed 70-80% of the way to resistance, TP is a 0.5% ratio."_ This vastly expands the search space for nuanced strategies.
 
-2.  **`platinum_strategy_discoverer.py` (The Rule Miner):** This is the main engine. It takes each blueprint from the combinations file and uses a Decision Tree model to find specific market conditions under which that blueprint is profitable. It's designed to be run repeatedly, incorporating new data and feedback from backtesting.
+2.  **`platinum_strategy_discoverer.py` (The Rule Miner):** This is the main engine. It takes each binned blueprint and uses a **Decision Tree Regressor** to find specific market conditions under which that blueprint has a high _predicted win rate_. It is designed to be run repeatedly, incorporating new data and feedback from backtesting.
 
 ---
 
 ## ⚙️ How It Works: The Discovery Process
 
-The `platinum_strategy_discoverer.py` script follows a sophisticated workflow for each instrument:
-
-1.  **Load Blueprints:** It loads the master list of strategy definitions from `platinum_data/combinations/`.
-2.  **State Management:** It checks for already discovered strategies (`discovered_strategy/`) and any blacklisted strategies (`blacklists/`). It intelligently decides to process only **new** or **blacklisted** combinations, saving immense amounts of time on subsequent runs.
-3.  **Iterate and Filter:** For each blueprint, it performs a memory-efficient scan of the large `silver_data/outcomes` file (in chunks) to find all historical trades that perfectly match that strategy's structure (e.g., all trades where the SL was placed within 10 basis points of the 20-period SMA).
-4.  **Create Training Data:** It fetches the corresponding ML-ready market features from the `gold_data/features` file for each of these trades, creating a dedicated training dataset for this _single_ blueprint.
-5.  **Machine Learning Rule Discovery:**
-    -   It trains a **Decision Tree Classifier** on this dataset. The goal is to teach the model to distinguish between winning and losing trades _for this specific strategy structure_.
+1.  **Load Binned Blueprints:** It loads the master list of granular strategy definitions (e.g., `sl_def=resistance`, `sl_bin=7`).
+2.  **State Management:** It checks for already discovered strategies and blacklists, ensuring it only processes **new** or **blacklisted** combinations.
+3.  **Iterate and Filter:** For each blueprint, it performs a memory-efficient scan of the `silver_data/outcomes` file to find all trades matching that exact structure (e.g., all trades where the SL was placed between 70% and 80% of the way to resistance).
+4.  **Aggregate to Prevent Bias:** To solve the "multiple votes" problem, it groups the matching trades by their `entry_time` and calculates the **average win rate for each candle**. This ensures every market event gets one fair vote.
+5.  **Create Training Data:** It fetches the ML-ready market features from the `gold_data/features` file for each of these unique candles.
+6.  **Machine Learning Rule Discovery:**
+    -   It trains a **Decision Tree Regressor** on this aggregated data. The model's goal is to predict the **win rate** of the strategy blueprint based on the market conditions.
     -   The Decision Tree is used because it produces simple, human-readable **IF-THEN rules**.
-6.  **Extract & Save Strategies:** The script extracts all high-probability rules from the trained tree (e.g., `IF 'RSI_14' > 1.2 AND 'session_London' == True THEN...`). Each rule, along with its performance metrics (win probability, number of trades), is saved as a complete, actionable strategy to `platinum_data/discovered_strategy/`.
+7.  **Extract & Save Strategies:** The script extracts all rules from the tree that predict a win rate above a set threshold (e.g., >60%). Each rule is saved as a complete, actionable strategy.
 
 ---
 
@@ -76,26 +75,36 @@ The Platinum Layer is designed to learn and adapt over time.
 
 ### 1. `platinum_data/combinations/{instrument}.csv`
 
-A simple but crucial blueprint file. It lists every unique way a trade's SL and TP can be defined.
+This file now contains highly granular blueprints for testing.
 
-| Column   | Description                                      | Example              |
-| :------- | :----------------------------------------------- | :------------------- |
-| `type`   | The type of strategy structure.                  | `Semi-Dynamic-SL`    |
-| `sl_def` | The Stop-Loss definition (a level or a ratio).   | `SMA_20`             |
-| `tp_def` | The Take-Profit definition (a level or a ratio). | `0.005` (i.e., 0.5%) |
+| Column   | Description                                                                                                    | Example                  |
+| :------- | :------------------------------------------------------------------------------------------------------------- | :----------------------- |
+| `type`   | The type of binned strategy.                                                                                   | `Semi-Dynamic-SL-Binned` |
+| `sl_def` | The SL definition (level or ratio).                                                                            | `resistance`             |
+| `sl_bin` | **(NEW)** The 10% placement bin. A value of `7` means 70-80%. A value of `-1` means -10% to 0% (behind entry). | `7`                      |
+| `tp_def` | The TP definition (level or ratio).                                                                            | `0.005`                  |
+| `tp_bin` | **(NEW)** The 10% placement bin for the TP.                                                                    | `NaN`                    |
 
 ### 2. `platinum_data/discovered_strategy/{instrument}.csv`
 
-This is the primary, high-value output of the entire pipeline up to this point. Each row is a complete, testable trading strategy.
+This is the primary output. Each row is a complete, testable trading strategy with more context.
 
-| Column        | Description                                                           | Example                                                |
-| :------------ | :-------------------------------------------------------------------- | :----------------------------------------------------- |
-| `type`        | The strategy structure type.                                          | `Semi-Dynamic-SL`                                      |
-| `sl_def`      | The Stop-Loss definition.                                             | `SMA_20`                                               |
-| `tp_def`      | The Take-Profit definition.                                           | `0.005`                                                |
-| `market_rule` | **The discovered ML rule.** The market conditions required for entry. | `` `RSI_14` > 1.25 and `vol_regime_low_vol` == True `` |
-| `win_prob`    | The historical win probability of trades matching this exact rule.    | `0.7152` (i.e., 71.52%)                                |
-| `num_trades`  | The number of historical trades that fit this rule.                   | `152`                                                  |
+| Column                           | Description                                                         | Example                                                |
+| :------------------------------- | :------------------------------------------------------------------ | :----------------------------------------------------- |
+| `type`, `sl_def`, `sl_bin`, etc. | The complete strategy blueprint definition.                         |                                                        |
+| `market_rule`                    | **The discovered ML rule.** The market conditions for entry.        | `` `RSI_14` > 1.25 and `vol_regime_low_vol` == True `` |
+| `win_prob`                       | The **predicted win rate** for candles matching this rule.          | `0.7152`                                               |
+| `num_candles`                    | The number of unique historical candles that fit this rule.         | `88`                                                   |
+| `total_trades`                   | The total number of trade simulations represented by those candles. | `451`                                                  |
+
+---
+
+## 🧮 Example Workflow
+
+1. Load `gold_data/features` and `silver_data/outcomes`.
+2. Generate strategy blueprints (`combinations`).
+3. Discover actionable strategies using ML (`discovered_strategy`).
+4. Output is ready for backtesting and real-world evaluation.
 
 ---
 
