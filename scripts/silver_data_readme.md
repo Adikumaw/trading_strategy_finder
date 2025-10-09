@@ -20,8 +20,8 @@ This script follows a two-step process to create two distinct, synchronized data
 2.  **Step 2: Generate an `outcomes` Dataset:**
     -   It finds the corresponding `bronze_data` file.
     -   It reads the massive trade simulation file in memory-efficient chunks.
-    -   It **filters** these trades, keeping only those whose `entry_time` occurs on or after the first available timestamp in the `features` dataset. This synchronizes the two files.
-    -   It saves the filtered trade results to `silver_data/outcomes/`.
+    -   For each trade, it **enriches** it by calculating dozens of **new positioning features** (e.g., the distance from the SL/TP to key indicators).
+    -   It saves the final enriched trade results to `silver_data/outcomes/`.
 
 This creates a powerful **one-to-many relationship**, where the `time` column in the `features` file acts as a unique key to link one set of market conditions to the many possible trade outcomes in the `outcomes` file.
 
@@ -45,7 +45,7 @@ project_root/
 │   ├── features/         # OUTPUT 1: Unique market features, one row per candle
 │   │   └── AUDUSD1.csv
 │   │
-│   └── outcomes/         # OUTPUT 2: All trade outcomes, many rows per candle
+│   └── outcomes/         # OUTPUT 2: All trade outcomes, enriched with new features
 │       └── AUDUSD1.csv
 │
 └── scripts/
@@ -58,13 +58,14 @@ project_root/
 
 This script generates a rich set of market features for **every candle**, ensuring you have a complete basis for discovering any possible strategy. The features are calculated in efficient batches to optimize performance.
 
-| Feature Category           | Examples                                                                      | Purpose                                                                 |
-| :------------------------- | :---------------------------------------------------------------------------- | :---------------------------------------------------------------------- |
-| **Technical Indicators**   | `SMA`, `EMA`, `RSI`, `MACD`, `Bollinger Bands`, `ATR`, `ADX`, `CCI`, `OBV`    | Quantify market momentum, trend, volatility, and volume dynamics.       |
-| **Candlestick Patterns**   | `CDLDOJI`, `CDLENGULFING`, `CDLHAMMER`, etc. (All 61 from `talib`)            | Capture classic price action signals and potential reversals.           |
-| **Support & Resistance**   | `support`, `resistance` (calculated with a fast, Numba-accelerated algorithm) | Identify key historical price levels that might influence future price. |
-| **Price Action & Regimes** | `bullish_ratio_last_N`, `avg_body_last_N`, `trend_regime`, `vol_regime`       | Characterize recent price behavior and the overall market state.        |
-| **Time-Based Features**    | `session` (Asian, London, NY), `hour`, `weekday`                              | Allow the model to find patterns related to time of day or week.        |
+| Feature Category           | Examples                                                                      | Purpose                                                                                                                        |
+| :------------------------- | :---------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------- |
+| **Technical Indicators**   | `SMA`, `EMA`, `RSI`, `MACD`, `Bollinger Bands`, `ATR`, `ADX`, `CCI`, `OBV`    | Quantify market momentum, trend, volatility, and volume dynamics.                                                              |
+| **Candlestick Patterns**   | `CDLDOJI`, `CDLENGULFING`, `CDLHAMMER`, etc. (All 61 from `talib`)            | Capture classic price action signals and potential reversals.                                                                  |
+| **Support & Resistance**   | `support`, `resistance` (calculated with a fast, Numba-accelerated algorithm) | Identify key historical price levels that might influence future price.                                                        |
+| **Price Action & Regimes** | `bullish_ratio_last_N`, `avg_body_last_N`, `trend_regime`, `vol_regime`       | Characterize recent price behavior and the overall market state.                                                               |
+| **Time-Based Features**    | `session` (Asian, London, NY), `hour`, `weekday`                              | Allow the model to find patterns related to time of day or week.                                                               |
+| **SL/TP Positioning**      | `sl_dist_to_SMA_50_bps`, `tp_dist_to_BB_upper_bps`                            | **(NEW)** Quantify the distance from trade targets to key levels in basis points, giving the model crucial relational context. |
 
 ---
 
@@ -94,13 +95,11 @@ This script generates a rich set of market features for **every candle**, ensuri
     =========================
     Processing: AUDUSD1.csv
     =========================
-    STEP 1: Creating Silver Features dataset (unique per candle)...
-    ...
-    ✅ Silver Features saved to: silver_data\features\AUDUSD1.csv (99800 rows)
+    STEP 1: Creating Silver Features dataset...
+    ✅ Silver Features saved to: silver_data\features\AUDUSD1.csv
 
-    STEP 2: Creating Silver Outcomes dataset (from bronze data)...
-    ...
-    ✅ Silver Outcomes saved to: silver_data\outcomes\AUDUSD1.csv
+    STEP 2: Creating ENRICHED Silver Outcomes dataset...
+    ✅ Enriched Silver Outcomes saved to: silver_data\outcomes\AUDUSD1.csv
     ```
 
 ---
@@ -126,17 +125,19 @@ This file contains the complete market context. It has **one row for every candl
 
 ### 2. `silver_data/outcomes/{instrument}.csv`
 
-This file contains all the simulated trade results from the Bronze layer, synchronized with the features file. It can have **many rows for every candle**.
+This file contains the simulated trades, **enriched with new positioning features**. It can have **many rows for every candle**.
 
-| Column                 | Description                                                                              |
-| :--------------------- | :--------------------------------------------------------------------------------------- |
-| `entry_time`           | **Foreign Key.** The timestamp of the trade entry. Links to `time` in the features file. |
-| `trade_type`           | “buy” or “sell”.                                                                         |
-| `entry_price`          | Entry price at candle close.                                                             |
-| `sl_price`, `tp_price` | Stop-loss and Take-profit price levels.                                                  |
-| `sl_ratio`, `tp_ratio` | The relative SL/TP percentages used for this trade.                                      |
-| `exit_time`            | The timestamp when the trade concluded.                                                  |
-| `outcome`              | "win" (or "loss" if the bronze script generates them).                                   |
+| Column                           | Description                                                                                                                          |
+| :------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------- |
+| `entry_time`                     | **Foreign Key.** Links to `time` in the features file.                                                                               |
+| `trade_type`                     | “buy” or “sell”.                                                                                                                     |
+| `entry_price`                    | Entry price at candle close.                                                                                                         |
+| `sl_price`, `tp_price`           | Stop-loss and Take-profit price levels.                                                                                              |
+| `sl_ratio`, `tp_ratio`           | The relative SL/TP percentages used for this trade.                                                                                  |
+| `exit_time`                      | The timestamp when the trade concluded.                                                                                              |
+| `outcome`                        | "win" (or "loss").                                                                                                                   |
+| **`sl_dist_to_[indicator]_bps`** | **(NEW)** The distance from the SL to an indicator, in **basis points (1 bps = 0.01%)**. Negative means SL is _below_ the indicator. |
+| **`tp_dist_to_[indicator]_bps`** | **(NEW)** The distance from the TP to an indicator, in **basis points**. Positive means TP is _above_ the indicator.                 |
 
 ---
 
@@ -144,6 +145,6 @@ This file contains all the simulated trade results from the Bronze layer, synchr
 
 These two decoupled files are the **correct** inputs for the next stage of the pipeline (`gold_data_generator.py`). The next script will:
 
-1.  Load the `outcomes.csv` to calculate a **win rate for each `entry_time`**.
+1.  Load the `outcomes.csv` to calculate a **win rate for each unique combination of `sl_ratio`, `tp_ratio`, and positioning features**.
 2.  Join this win rate onto the `features.csv` using the `time` and `entry_time` columns as the key.
-3.  This creates a clean dataset for training a model to predict which market conditions lead to a high probability of success, fixing the "one candle, many votes" logical flaw.
+3.  This creates a clean dataset for training a model to predict which market conditions and trade structures lead to a high probability of success.
