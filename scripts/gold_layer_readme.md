@@ -1,6 +1,6 @@
 # 🥇 Gold Data Generator (ML-Ready Feature Processor)
 
-This Python script represents the final and most critical step in the data preparation pipeline. Its sole purpose is to take the human-readable `silver_data/features` dataset and transform it into a fully normalized, standardized, and purely numerical **"Gold Dataset"** ready for direct input into machine learning models.
+This Python script represents the final step in the data preparation pipeline. Its sole purpose is to take the human-readable `silver_data/features` dataset and transform it into a fully normalized, standardized, and purely numerical **"Gold Dataset"** ready for direct input into machine learning models.
 
 This script completes the feature engineering process by converting all data points into a mathematical format that algorithms can effectively learn from.
 
@@ -89,3 +89,11 @@ The next logical step, which typically happens within the model training script 
 4.  **Join:** Merge the target variable (`y`) with the feature set (`X`) using the `time` column.
 
 This decoupled approach ensures a clean, modular, and logically sound pipeline, preventing data leakage and making the entire process easier to debug and manage.
+
+---
+
+## 🧮 Example Workflow
+
+1. Load `silver_data/features/{instrument}.csv`.
+2. Normalize and transform features, output to `gold_data/features/{instrument}.csv`.
+3. Use with `silver_data/outcomes/{instrument}.csv` for ML model training and strategy discovery (Platinum Layer).
