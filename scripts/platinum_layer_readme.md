@@ -1,8 +1,8 @@
 # 💎 Platinum Layer: The Strategy Discovery Engine
 
-The Platinum Layer is the culmination of the entire data pipeline. It acts as an intelligent, automated analyst that sifts through millions of trade possibilities to discover concrete, high-probability trading strategies.
+The Platinum Layer is the culmination of the entire data pipeline. It acts as an intelligent, automated analyst that sifts through millions of winning trades to find **robust and statistically significant patterns**.
 
-Its core purpose is to synthesize the market context from the **Gold Layer** with the trade results from the **Silver Layer**, using Machine Learning to find profitable, rule-based strategies.
+Its core purpose has evolved. Since the input data only contains wins, this layer no longer tries to predict profitability. Instead, it uses Machine Learning to solve a more important problem: **filtering out noise**. It finds strategy blueprints and market conditions that have historically produced a **high density of successful trades**, indicating a strong, repeatable pattern worthy of backtesting.
 
 ---
 
@@ -10,9 +10,9 @@ Its core purpose is to synthesize the market context from the **Gold Layer** wit
 
 The Platinum Layer operates in a two-stage process:
 
-1.  **`platinum_combinations_generator.py` (The Blueprint Creator):** This script is now a sophisticated scanner that generates advanced strategy "blueprints." It no longer just checks if a SL/TP is _at_ a level, but rather **bins the placement into 10% increments**. It creates blueprints like: _"SL placed 70-80% of the way to resistance, TP is a 0.5% ratio."_ This vastly expands the search space for nuanced strategies.
+1.  **`platinum_combinations_generator.py` (The Blueprint Creator):** This sophisticated scanner generates advanced strategy "blueprints." It bins SL/TP placements into 10% increments (including negative/directional placements), creating blueprints like: _"SL placed 70-80% of the way to resistance, TP is a 0.5% ratio."_
 
-2.  **`platinum_strategy_discoverer.py` (The Rule Miner):** This is the main engine. It takes each binned blueprint and uses a **Decision Tree Regressor** to find specific market conditions under which that blueprint has a high _predicted win rate_. It is designed to be run repeatedly, incorporating new data and feedback from backtesting.
+2.  **`platinum_strategy_discoverer.py` (The Pattern Significance Engine):** This is the main engine. It takes each blueprint and uses a **Decision Tree Regressor** to find specific market conditions that historically led to a **high frequency of successful trades** (a high "trade density").
 
 ---
 
@@ -20,54 +20,25 @@ The Platinum Layer operates in a two-stage process:
 
 1.  **Load Binned Blueprints:** It loads the master list of granular strategy definitions (e.g., `sl_def=resistance`, `sl_bin=7`).
 2.  **State Management:** It checks for already discovered strategies and blacklists, ensuring it only processes **new** or **blacklisted** combinations.
-3.  **Iterate and Filter:** For each blueprint, it performs a memory-efficient scan of the `silver_data/outcomes` file to find all trades matching that exact structure (e.g., all trades where the SL was placed between 70% and 80% of the way to resistance).
-4.  **Aggregate to Prevent Bias:** To solve the "multiple votes" problem, it groups the matching trades by their `entry_time` and calculates the **average win rate for each candle**. This ensures every market event gets one fair vote.
+3.  **Iterate and Filter:** For each blueprint, it performs a memory-efficient scan of the `silver_data/outcomes` file to find all winning trades that match that exact structure.
+4.  **Aggregate for Significance:** It groups the matching trades by their `entry_time` and calculates the **total number of trades for each candle**. This is the core metric.
 5.  **Create Training Data:** It fetches the ML-ready market features from the `gold_data/features` file for each of these unique candles.
 6.  **Machine Learning Rule Discovery:**
-    -   It trains a **Decision Tree Regressor** on this aggregated data. The model's goal is to predict the **win rate** of the strategy blueprint based on the market conditions.
-    -   The Decision Tree is used because it produces simple, human-readable **IF-THEN rules**.
-7.  **Extract & Save Strategies:** The script extracts all rules from the tree that predict a win rate above a set threshold (e.g., >60%). Each rule is saved as a complete, actionable strategy.
+    -   It trains a **Decision Tree Regressor**. The model's goal is no longer to predict a win rate, but to predict the **trade count** (the "density") for the strategy blueprint based on market conditions.
+    -   It learns to identify "hotspots"—market conditions where this blueprint was historically a very common and successful pattern.
+7.  **Extract & Save Strategies:** The script extracts rules from the tree that predict a **high trade density** above a set threshold. Each rule is saved as a complete, statistically significant strategy ready for the final validation step.
 
 ---
 
 ## 📁 Platinum Folder Structure
 
-This layer reads from the Silver and Gold layers and produces a new set of highly valuable data artifacts.
-
-```
-project_root/
-│
-├── silver_data/
-│   └── outcomes/         # INPUT: Enriched trade outcomes with positioning data
-│
-├── gold_data/
-│   └── features/         # INPUT: ML-ready, normalized market features
-│
-├── platinum_data/
-│   │
-│   ├── combinations/     # OUTPUT 1: Master list of all unique strategy blueprints
-│   │   └── AUDUSD1.csv
-│   │
-│   ├── discovered_strategy/ # OUTPUT 2: The final, actionable trading strategies
-│   │   └── AUDUSD1.csv
-│   │
-│   └── blacklists/       # INPUT (Feedback Loop): Strategies that failed backtesting
-│       └── AUDUSD1.csv
-│
-└── scripts/
-    ├── platinum_combinations_generator.py
-    └── platinum_strategy_discoverer.py
-```
+_(Folder structure is unchanged.)_
 
 ---
 
 ## 🔄 State Management: Blacklists & The Feedback Loop
 
-The Platinum Layer is designed to learn and adapt over time.
-
--   **Skipping:** The discoverer will not re-analyze a strategy blueprint if valid rules for it already exist in the `discovered_strategy` file.
--   **Blacklisting:** The **Backtester** (the next layer) is responsible for validating these discovered strategies. If a strategy looks good on paper but fails a rigorous backtest (e.g., due to poor risk-reward over time), the backtester will add its definition to a `blacklist` file.
--   **Re-Discovery:** On its next run, the `platinum_strategy_discoverer` will see this blacklisted blueprint and **re-process it**, attempting to find a _different, better_ market rule for that same strategy structure. This creates a powerful feedback loop for continuous improvement.
+*(This logic is unchanged, but its purpose is now clearer: it allows the engine to re-evaluate blacklisted blueprints to find more *robust* patterns, not just more *profitable* ones.)*
 
 ---
 
@@ -75,7 +46,7 @@ The Platinum Layer is designed to learn and adapt over time.
 
 ### 1. `platinum_data/combinations/{instrument}.csv`
 
-This file now contains highly granular blueprints for testing.
+This file contains the highly granular blueprints for testing.
 
 | Column   | Description                                                                                                    | Example                  |
 | :------- | :------------------------------------------------------------------------------------------------------------- | :----------------------- |
@@ -87,27 +58,18 @@ This file now contains highly granular blueprints for testing.
 
 ### 2. `platinum_data/discovered_strategy/{instrument}.csv`
 
-This is the primary output. Each row is a complete, testable trading strategy with more context.
+This is the primary output. Each row is a **statistically significant pattern** that is a candidate for being a real strategy.
 
-| Column                           | Description                                                         | Example                                                |
-| :------------------------------- | :------------------------------------------------------------------ | :----------------------------------------------------- |
-| `type`, `sl_def`, `sl_bin`, etc. | The complete strategy blueprint definition.                         |                                                        |
-| `market_rule`                    | **The discovered ML rule.** The market conditions for entry.        | `` `RSI_14` > 1.25 and `vol_regime_low_vol` == True `` |
-| `win_prob`                       | The **predicted win rate** for candles matching this rule.          | `0.7152`                                               |
-| `num_candles`                    | The number of unique historical candles that fit this rule.         | `88`                                                   |
-| `total_trades`                   | The total number of trade simulations represented by those candles. | `451`                                                  |
-
----
-
-## 🧮 Example Workflow
-
-1. Load `gold_data/features` and `silver_data/outcomes`.
-2. Generate strategy blueprints (`combinations`).
-3. Discover actionable strategies using ML (`discovered_strategy`).
-4. Output is ready for backtesting and real-world evaluation.
+| Column                           | Description                                                                                                                                                             | Example                                                |
+| :------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------- |
+| `type`, `sl_def`, `sl_bin`, etc. | The complete strategy blueprint definition.                                                                                                                             |                                                        |
+| `market_rule`                    | **The discovered ML rule.** The market conditions for the pattern.                                                                                                      | `` `RSI_14` > 1.25 and `vol_regime_low_vol` == True `` |
+| `avg_trade_density`              | **(NEW)** The average number of successful trades generated per candle when this rule is met. A higher number indicates a more robust and frequently occurring pattern. | `8.54`                                                 |
+| `num_candles`                    | The number of unique historical candles that fit this rule.                                                                                                             | `88`                                                   |
+| `total_trades`                   | The total number of successful trade simulations represented by those candles.                                                                                          | `751`                                                  |
 
 ---
 
 ## 📈 Next Steps
 
-The `discovered_strategy` files are the direct input for the final **Backtesting Layer**. The backtester will simulate these strategies over the entire dataset to evaluate their long-term performance, including metrics like Sharpe ratio, max drawdown, and overall profitability, ultimately determining their real-world viability.
+The `discovered_strategy` files are the direct input for the final **Backtesting Layer**. The backtester's job is now even more critical: it will take these statistically significant _patterns_ and simulate them to determine if they are actually _profitable_, evaluating their performance with metrics like Sharpe ratio, max drawdown, and overall return.
