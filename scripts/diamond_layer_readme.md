@@ -2,60 +2,46 @@
 
 The Diamond Layer is the final and most important stage of the entire strategy discovery pipeline. It acts as the ultimate judge, taking the statistically significant _patterns_ discovered by the Platinum Layer and subjecting them to a rigorous, multi-market backtest to determine if they are truly profitable and robust **trading strategies**.
 
-Its core purpose is to simulate the real-world performance of a strategy, providing the definitive metrics needed to make a final go/no-go decision.
+Its core purpose is to simulate the real-world performance of a strategy with proper risk management, providing the definitive metrics needed to make a final go/no-go decision.
 
 ---
 
-## 🏛️ Architectural Philosophy: The "Clean Room" Validation
+## 🏛️ Architectural Overview: A Two-Stage Validation Process
 
-This backtester is built on a critical architectural principle: **it trusts nothing**. To prevent any form of data leakage or lookahead bias, it does **not** use any pre-processed Silver or Gold data files.
+The Diamond Layer is split into two distinct scripts to maximize efficiency and speed. This "prepare once, test many" approach avoids redundant, time-consuming calculations.
 
-Instead, for each market it tests, it performs a "clean room" simulation:
+1.  **`diamond_data_prepper.py` (The Data Minter):**
 
-1.  It starts with **only** the raw OHLCV price data.
-2.  It re-creates the entire Silver and Gold data pipelines **in-memory** from scratch.
-3.  Only then does it apply the strategy rules and simulate trades.
+    -   **Job:** A one-time, pre-processing script. It takes the raw market data and runs it through the entire `raw -> silver -> gold` feature generation pipeline.
+    -   **Output:** It saves the final, ready-to-use Silver and Gold DataFrames in a highly efficient `.parquet` format to the `diamond_data/prepared_data/` directory.
+    -   **Why:** This is a massive performance optimization. It performs the hours-long feature calculation **once**, so that the main backtester can run in minutes.
 
-This perfectly mimics how a live trading algorithm would work, ensuring the backtest results are as realistic and reliable as possible.
+2.  **`diamond_backtester.py` (The Simulation Engine):**
+    -   **Job:** This is the high-speed, parallelized simulation engine. It is now incredibly lightweight and fast.
+    -   **Workflow:** It loads the pre-prepared data from the `prepared_data` cache, then uses a `multiprocessing.Pool` to test hundreds of strategies in parallel across all available CPU cores.
+    -   **Why:** By separating data prep from simulation, this script can focus entirely on its core task: running thousands of backtests as quickly as possible.
 
 ---
 
-## ⚙️ How It Works: The Backtesting Process
+## ⚙️ How It Works: The Backtesting Workflow
 
-The script follows a highly optimized, multi-stage workflow:
-
-1.  **Interactive Setup:** The script begins by asking the user two questions:
-
-    -   Which `discovered_strategy` file do you want to test?
-    -   Which markets from your `raw_data` folder do you want to validate these strategies on? (You can select specific ones or `all`).
-
-2.  **"Process Once, Test Many":** To maximize speed, the script prepares all necessary data upfront.
-
-    -   It loops through each selected market _once_.
-    -   For each market, it calculates all Silver and Gold features and stores them in a `market_data_cache` in RAM.
-    -   This prevents redundant feature calculation and is a massive performance optimization.
-
-3.  **The Main Simulation Loop:** The script then iterates through each strategy rule from the selected Platinum file.
-
-    -   For each strategy, it loops through every market in the `market_data_cache`.
-    -   **Find Entries:** It uses the strategy's `market_rule` to query the in-memory Gold data and identify all valid trade entry points.
-    -   **Simulate Trades:** It runs the core simulation engine:
-        -   Calculates the precise SL/TP price levels using the strategy definition and the in-memory Silver data.
-        -   Applies a **Fixed Fractional Risk** model to calculate position size (e.g., risk 2% of capital per trade).
-        -   Steps candle-by-candle through the price history to determine the trade's outcome (Win/Loss) and P&L.
-        -   Keeps a running log of the account equity to calculate performance metrics.
-    -   **Analyze Regimes:** It records the distribution of market conditions (`session`, `trend_regime`, `vol_regime`) for all trades taken by the strategy in that market.
-
-4.  **Generate Reports & Feedback Loop:** After all simulations are complete:
-    -   It compiles a **Detailed Report** with the performance of every strategy on every market tested.
-    -   It creates a high-level **Summary Report**, grouping by strategy to show its average performance and robustness across all markets.
-    -   It automatically identifies strategies that failed to meet performance thresholds (e.g., Profit Factor < 1.2) and adds them to a **Blacklist file**, completing the feedback loop for the Platinum Layer.
+1.  **Run `diamond_data_prepper.py`:** You run this script once to prepare all the markets you intend to backtest on.
+2.  **Run `diamond_backtester.py`:**
+    -   **Interactive Setup:** The script asks you which `discovered_strategy` file you want to test and which of the _prepared markets_ you want to validate against.
+    -   **Load Prepared Data:** It loads all the necessary Silver and Gold DataFrames from the `prepared_data` cache into RAM.
+    -   **Parallel Simulation:** It distributes the list of strategies to a pool of worker processes. Each worker independently backtests its assigned strategies against all the in-memory market data.
+    -   **Core Simulation Engine:** Each backtest performs:
+        -   **Entry Identification:** Finds all valid trade entries using the strategy's `market_rule`.
+        -   **Risk Management:** Applies a **Fixed Fractional Risk** model to calculate position size (e.g., risk 2% of capital per trade).
+        -   **Trade Simulation:** Steps candle-by-candle to determine the outcome (Win/Loss) and P&L of every trade.
+        -   **Performance & Regime Analysis:** Calculates final metrics (Profit Factor, Max Drawdown) and analyzes the market conditions (`session`, `trend_regime`) for the trades.
+    -   **Generate Reports & Feedback Loop:** After all simulations are complete, it compiles the final **Summary** and **Detailed Reports** and automatically generates a **Blacklist** of underperforming strategies to feed back to the Platinum Layer.
 
 ---
 
 ## 📁 Diamond Folder Structure
 
-This layer produces the final, actionable reports of the entire project.
+This layer introduces a new directory for the pre-prepared data cache.
 
 ```
 project_root/
@@ -65,12 +51,12 @@ project_root/
 │   └── blacklists/          # OUTPUT: Failed strategies are sent back here
 │
 ├── diamond_data/
-│   └── backtesting_results/ # OUTPUT: The final performance reports
-│       ├── summary_report_AUDUSD1.csv
-│       └── detailed_report_AUDUSD1.csv
+│   ├── prepared_data/       # INTERMEDIATE: The pre-calculated market data cache
+│   └── backtesting_results/ # FINAL OUTPUT: The performance reports
 │
 └── scripts/
-    └── diamond_backtester.py
+    ├── diamond_data_prepper.py    # Script 1
+    └── diamond_backtester.py      # Script 2
 ```
 
 ---
@@ -79,36 +65,34 @@ project_root/
 
 ### 1. `diamond_data/backtesting_results/summary_report_{instrument}.csv`
 
-This is the high-level overview. Each row represents one strategy, aggregated across all tested markets. It's the best place to start your analysis.
+The high-level overview. Each row is one strategy, with its performance aggregated across all tested markets.
 
-| Column                        | Description                                                                             | Example      |
-| :---------------------------- | :-------------------------------------------------------------------------------------- | :----------- |
-| `strategy_id`                 | A unique ID for this specific strategy rule.                                            | `a1b2c3d4e5` |
-| `market_rule`, `sl_def`, etc. | The full definition of the strategy.                                                    |              |
-| **`markets_passed`**          | **(CRITICAL)** How many markets the strategy was profitable on out of the total tested. | `4/5`        |
-| **`avg_profit_factor`**       | **(CRITICAL)** The average Profit Factor across all tested markets.                     | `1.78`       |
-| `avg_max_drawdown_pct`        | The average Maximum Drawdown across all tested markets.                                 | `12.5`       |
-| `total_trades`                | The total number of trades taken across all markets.                                    | `1253`       |
+| Column                        | Description                                                                                | Example      |
+| :---------------------------- | :----------------------------------------------------------------------------------------- | :----------- |
+| `strategy_id`                 | A unique ID for this specific strategy rule.                                               | `a1b2c3d4e5` |
+| `market_rule`, `sl_def`, etc. | The full definition of the strategy.                                                       |              |
+| **`markets_passed`**          | **(CRITICAL)** How many markets the strategy was profitable on.                            | `4/5`        |
+| **`avg_profit_factor`**       | **(CRITICAL)** The average Profit Factor across all tested markets. A value > 1.2 is good. | `1.78`       |
+| `avg_max_drawdown_pct`        | The average Maximum Drawdown. A lower value is better.                                     | `12.5`       |
+| `total_trades`                | The total number of trades taken across all markets.                                       | `1253`       |
 
 ### 2. `diamond_data/backtesting_results/detailed_report_{instrument}.csv`
 
-This file provides the granular, per-market breakdown for deep-dive analysis.
+The granular, per-market breakdown for deep-dive analysis.
 
-| Column                                      | Description                                                                                                                               |
-| :------------------------------------------ | :---------------------------------------------------------------------------------------------------------------------------------------- |
-| `strategy_id`                               | The unique ID, used to group results for a single strategy.                                                                               |
-| `market`                                    | The specific market this row's results are for (e.g., `EURUSD1.csv`).                                                                     |
-| `profit_factor`, `max_drawdown_pct`, etc.   | The detailed performance metrics for this strategy _on this market_.                                                                      |
-| **`session_pct`, `trend_regime_pct`, etc.** | **(The "Why")** A dictionary showing the percentage of trades that occurred in each market regime (e.g., 75% in 'trend', 20% in 'range'). |
+| Column                                      | Description                                                                                        |
+| :------------------------------------------ | :------------------------------------------------------------------------------------------------- |
+| `strategy_id`                               | The unique ID, used to group results for a single strategy.                                        |
+| `market`                                    | The specific market this row's results are for (e.g., `EURUSD1.csv`).                              |
+| `profit_factor`, `max_drawdown_pct`, etc.   | The detailed performance metrics for this strategy _on this market_.                               |
+| **`session_pct`, `trend_regime_pct`, etc.** | **(The "Why")** A dictionary showing the percentage of trades that occurred in each market regime. |
 
 ---
 
 ## 📈 Next Steps: The Master Analyser
 
-The two output reports from this Diamond Layer are the final inputs for your visual "Master Analyser."
+The two output reports are the final inputs for your visual "Master Analyser."
 
--   Use the **Summary Report** to filter for robust strategies (e.g., `markets_passed == '5/5'` and `avg_profit_factor > 1.5`).
--   For each robust strategy, use its `strategy_id` to filter the **Detailed Report**.
--   From the detailed data, you can now plot:
-    -   An equity curve for each market to visually compare performance.
-    -   Bar charts of the regime analysis (`session_pct`, etc.) to understand _why_ the strategy performs differently across various markets.
+1.  Use the **Summary Report** to filter for robust strategies (e.g., `markets_passed == '5/5'` and `avg_profit_factor > 1.5`).
+2.  For each robust strategy, use its `strategy_id` to filter the **Detailed Report**.
+3.  From the detailed data, you can now plot an equity curve for each market and create charts of the regime analysis to understand _why_ a strategy performs differently in various market conditions.
