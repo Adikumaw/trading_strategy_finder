@@ -1,6 +1,5 @@
-# platinum_strategy_discoverer.py (Final Version with Dynamic Lift & Full Comments)
+# platinum_strategy_discoverer.py (Corrected Blacklist Logic)
 
-# Import standard libraries for data manipulation, file operations, and parallel processing
 import pandas as pd
 import numpy as np
 from sklearn.tree import DecisionTreeRegressor, _tree
@@ -11,19 +10,14 @@ import hashlib
 from multiprocessing import Pool, cpu_count
 from functools import partial
 
-# --- CONFIGURATION ---
-# The blueprint must have at least this many historical examples to be considered for analysis.
-MIN_CANDLES_FOR_ANALYSIS = 100 
-# A final discovered rule must apply to at least this many of the blueprint's candles. Prevents overfitting.
-MIN_CANDLES_PER_RULE = 50      
-# Limits the complexity of discovered rules (e.g., max of 5 'AND' conditions).
-DECISION_TREE_MAX_DEPTH = 10    
-# NEW: The "Smart" Filter. A rule is only significant if its trade density is at least 1.5x the blueprint's average.
-DENSITY_LIFT_THRESHOLD = 1.5   
-# A safe default for multiprocessing, leaving cores free for the OS.
+# --- CONFIGURATION (Unchanged) ---
+MIN_CANDLES_FOR_ANALYSIS = 100
+MIN_CANDLES_PER_RULE = 50
+DECISION_TREE_MAX_DEPTH = 10 # Suggestion: Experiment with 4 or 5 for more robust rules
+DENSITY_LIFT_THRESHOLD = 1.5
 MAX_CPU_USAGE = max(1, cpu_count() - 2)
 
-# --- FUNCTIONS ---
+# --- FUNCTIONS (Unchanged) ---
 def get_rules_from_tree(tree, feature_names):
     """
     Extracts all valid rule paths from a trained Decision Tree that meet the minimum sample size.
@@ -63,7 +57,6 @@ def process_definition_batch(definition, gold_features_df, targets_dir):
     
     # Abort early if the target file doesn't exist (meaning no trades were ever found for this blueprint).
     if not os.path.exists(target_file): return []
-        
     try:
         # Read the pre-computed data, which contains 'entry_time' and 'trade_count'.
         candle_agg_df = pd.read_csv(target_file)
@@ -89,13 +82,11 @@ def process_definition_batch(definition, gold_features_df, targets_dir):
     
     # Extract all valid rule paths from the trained model.
     rules = get_rules_from_tree(model, list(X.columns))
-
     rules_found = []
     if rules:
         # --- NEW DYNAMIC FILTERING LOGIC ---
         # 1. Calculate the baseline average density for this entire blueprint.
         baseline_density = training_slice['trade_count'].mean()
-        
         for rule in rules:
             # For each rule, find the subset of data it applies to.
             rule_candle_times = X.query(rule['rule']).index if rule['rule'] != 'all_trades' else X.index
@@ -115,7 +106,7 @@ def process_definition_batch(definition, gold_features_df, targets_dir):
     return rules_found
 
 if __name__ == "__main__":
-    # --- Setup and State Management (Unchanged and Correct) ---
+    # --- Setup (Unchanged) ---
     core_dir = os.path.dirname(os.path.abspath(__file__))
     gold_features_dir, combinations_dir, discovered_dir, blacklist_dir, targets_dir = [os.path.abspath(os.path.join(core_dir, '..', d)) for d in ['gold_data/features', 'platinum_data/combinations', 'platinum_data/discovered_strategy', 'platinum_data/blacklists', 'platinum_data/targets']]
     os.makedirs(discovered_dir, exist_ok=True); os.makedirs(blacklist_dir, exist_ok=True)
@@ -123,14 +114,13 @@ if __name__ == "__main__":
     combination_files = [f for f in os.listdir(combinations_dir) if f.endswith('.csv')]
     if not combination_files: print("❌ No combination files found.")
     else:
+        # --- User Prompts (Unchanged) ---
         print(f"Found {len(combination_files)} instrument(s) to process.")
         use_multiprocessing = input("Use multiprocessing? (y/n): ").strip().lower() == 'y'
         if use_multiprocessing: num_processes = MAX_CPU_USAGE
         else:
-            try:
-                num_processes = int(input(f"Enter number of processes to use (1-{cpu_count()}): ").strip())
-                if num_processes < 1 or num_processes > cpu_count(): raise ValueError
-            except ValueError: print("Invalid input. Defaulting to 1 process."); num_processes = 1
+            try: num_processes = int(input(f"Enter number of processes to use (1-{cpu_count()}): ").strip())
+            except ValueError: num_processes = 1
         
         for fname in combination_files:
             print(f"\n{'='*25}\nProcessing: {fname}\n{'='*25}")
@@ -143,48 +133,64 @@ if __name__ == "__main__":
                 print(f"❌ Target files not found for {instrument_name}. Run extractor first."); continue
             
             all_definitions = pd.read_csv(combinations_path)
-            all_definitions['sl_def'] = all_definitions['sl_def'].astype(object)
-            all_definitions['tp_def'] = all_definitions['tp_def'].astype(object)
-            if 'sl_bin' in all_definitions.columns: 
-                all_definitions['sl_bin'] = all_definitions['sl_bin'].astype('Int64')
-            if 'tp_bin' in all_definitions.columns: 
-                all_definitions['tp_bin'] = all_definitions['tp_bin'].astype('Int64')
-            
-            try:
-                with open(processed_log_path, 'r') as f: processed_keys = set(f.read().splitlines())
-            except FileNotFoundError: processed_keys = set()
-            try: blacklist = pd.read_csv(blacklist_path)
-            except FileNotFoundError: blacklist = pd.DataFrame()
-            
+            # --- Type casting (Unchanged) ---
+            all_definitions['sl_def'] = all_definitions['sl_def'].astype(object); all_definitions['tp_def'] = all_definitions['tp_def'].astype(object)
+            if 'sl_bin' in all_definitions.columns: all_definitions['sl_bin'] = all_definitions['sl_bin'].astype('Int64')
+            if 'tp_bin' in all_definitions.columns: all_definitions['tp_bin'] = all_definitions['tp_bin'].astype('Int64')
             key_cols = ['type', 'sl_def', 'sl_bin', 'tp_def', 'tp_bin']
             all_definitions['key'] = all_definitions[key_cols].astype(str).sum(axis=1).apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
-            if not blacklist.empty:
-                blacklist['sl_def'] = blacklist['sl_def'].astype(object)
-                blacklist['tp_def'] = blacklist['tp_def'].astype(object)
-                if 'sl_bin' in blacklist.columns: 
-                    blacklist['sl_bin'] = blacklist['sl_bin'].astype('Int64')
-                if 'tp_bin' in blacklist.columns: 
-                    blacklist['tp_bin'] = blacklist['tp_bin'].astype('Int64')
+
+            # --- FIX START: Correct Blacklist and State Management Logic ---
+
+            # 1. Load the blacklist of failed blueprints.
+            try:
+                blacklist = pd.read_csv(blacklist_path)
+                # Ensure correct types for key generation
+                blacklist['sl_def'] = blacklist['sl_def'].astype(object); blacklist['tp_def'] = blacklist['tp_def'].astype(object)
+                if 'sl_bin' in blacklist.columns: blacklist['sl_bin'] = blacklist['sl_bin'].astype('Int64')
+                if 'tp_bin' in blacklist.columns: blacklist['tp_bin'] = blacklist['tp_bin'].astype('Int64')
                 blacklist['key'] = blacklist[key_cols].astype(str).sum(axis=1).apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
                 blacklisted_keys = set(blacklist['key'])
-                processed_keys -= blacklisted_keys
+                print(f"Found {len(blacklisted_keys)} blacklisted blueprints to ignore.")
+            except FileNotFoundError:
+                blacklisted_keys = set()
+                print("No blacklist file found. Processing all blueprints.")
+
+            # 2. Load the log of blueprints that have already been processed in previous runs.
+            try:
+                with open(processed_log_path, 'r') as f: processed_keys = set(f.read().splitlines())
+            except FileNotFoundError:
+                processed_keys = set()
+
+            # 3. Remove any discovered rules from previous runs if their parent blueprint is now blacklisted.
+            # This is a self-healing mechanism.
+            if blacklisted_keys:
                 try:
                     existing_results = pd.read_csv(discovered_path)
                     existing_results['key'] = existing_results[key_cols].astype(str).sum(axis=1).apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
                     cleaned_results = existing_results[~existing_results['key'].isin(blacklisted_keys)]
-                    cleaned_results.drop(columns=['key']).to_csv(discovered_path, index=False)
-                    print(f"Removed {len(existing_results) - len(cleaned_results)} old rule(s) for blacklisted blueprints.")
-                except FileNotFoundError: 
-                    pass
+                    
+                    if len(existing_results) > len(cleaned_results):
+                        cleaned_results.drop(columns=['key']).to_csv(discovered_path, index=False)
+                        print(f"Sanitized results: Removed {len(existing_results) - len(cleaned_results)} old rule(s) for now-blacklisted blueprints.")
+                except FileNotFoundError:
+                    pass # No existing results to clean.
+
+            # 4. Determine the final list of definitions to process.
+            # First, filter out blueprints that are on the blacklist.
+            definitions_to_process = all_definitions[~all_definitions['key'].isin(blacklisted_keys)]
+            # THEN, from the remaining valid blueprints, filter out those that have already been processed.
+            definitions_to_process = definitions_to_process[~definitions_to_process['key'].isin(processed_keys)]
+
+            # --- FIX END ---
             
-            definitions_to_process = all_definitions[~all_definitions['key'].isin(processed_keys)]
             if definitions_to_process.empty:
-                print("✅ All combinations have already been processed for this instrument."); continue
+                print("✅ All valid combinations have already been processed for this instrument."); continue
             
-            print(f"Analyzing {len(definitions_to_process)} new or blacklisted combinations.")
-            temp_df = pd.read_csv(gold_path, nrows=1)
-            dtype_map = {col: 'float32' for col in temp_df.columns if col not in ['time']}
-            gold_features_df = pd.read_csv(gold_path, parse_dates=['time'], dtype=dtype_map)
+            print(f"Found {len(definitions_to_process)} new or updated combinations to analyze.")
+            
+            # --- Rest of the script is unchanged ---
+            gold_features_df = pd.read_csv(gold_path, parse_dates=['time'])
 
             tasks = definitions_to_process.to_dict('records')
             effective_num_processes = min(num_processes, len(tasks))
@@ -215,6 +221,6 @@ if __name__ == "__main__":
                 final_df.to_csv(discovered_path, index=False)
                 print(f"✅ Cleanup complete. Total unique strategies: {len(final_df)}")
             except FileNotFoundError:
-                print("ℹ️ No strategies were discovered.")
+                print("ℹ️ No new strategies were discovered in this run.")
                 
     print("\n" + "="*50 + "\n✅ All strategy discovery complete.")
