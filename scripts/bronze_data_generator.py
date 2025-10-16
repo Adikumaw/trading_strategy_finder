@@ -1,4 +1,4 @@
-# bronze_data_generator.py (V3 - Fast, Memory-Efficient, and Correct)
+# bronze_data_generator.py (V4 - No Post-Processing Delay)
 
 import os
 import re
@@ -130,7 +130,13 @@ def process_file(task_id, input_file, output_file, config, spread_cost):
 
         # Check if the accumulator has enough trades to be saved to disk
         if len(profitable_trades_accumulator) >= OUTPUT_CHUNK_SIZE:
+            # --- FIX: Convert and format the chunk IN MEMORY before saving ---
             chunk_df = pd.DataFrame(profitable_trades_accumulator, columns=["entry_time", "trade_type", "entry_price", "sl_price", "tp_price", "sl_ratio", "tp_ratio", "exit_time"])
+            chunk_df['entry_time'] = pd.to_datetime(chunk_df['entry_time'], unit='ns')
+            chunk_df['exit_time'] = pd.to_datetime(chunk_df['exit_time'], unit='ns')
+            chunk_df['trade_type'] = chunk_df['trade_type'].map({1: 'buy', -1: 'sell'})
+            chunk_df['outcome'] = 'win'
+            
             chunk_df.to_csv(output_file, mode='a', header=is_first_chunk, index=False)
             total_trades_found += len(chunk_df)
             profitable_trades_accumulator.clear() # Clear memory
@@ -138,20 +144,18 @@ def process_file(task_id, input_file, output_file, config, spread_cost):
 
     # Save any remaining trades after the loop finishes
     if profitable_trades_accumulator:
+        # --- FIX: Convert and format the FINAL chunk before saving ---
         final_chunk_df = pd.DataFrame(profitable_trades_accumulator, columns=["entry_time", "trade_type", "entry_price", "sl_price", "tp_price", "sl_ratio", "tp_ratio", "exit_time"])
+        final_chunk_df['entry_time'] = pd.to_datetime(final_chunk_df['entry_time'], unit='ns')
+        final_chunk_df['exit_time'] = pd.to_datetime(final_chunk_df['exit_time'], unit='ns')
+        final_chunk_df['trade_type'] = final_chunk_df['trade_type'].map({1: 'buy', -1: 'sell'})
+        final_chunk_df['outcome'] = 'win'
+        
         final_chunk_df.to_csv(output_file, mode='a', header=is_first_chunk, index=False)
         total_trades_found += len(final_chunk_df)
 
     if total_trades_found == 0:
         return f"No trades found for {filename}."
-
-    # Final post-processing on the saved file to format timestamps and types
-    final_df = pd.read_csv(output_file)
-    final_df['entry_time'] = pd.to_datetime(final_df['entry_time'], unit='ns')
-    final_df['exit_time'] = pd.to_datetime(final_df['exit_time'], unit='ns')
-    final_df['trade_type'] = final_df['trade_type'].map({1: 'buy', -1: 'sell'})
-    final_df['outcome'] = 'win'
-    final_df.to_csv(output_file, index=False)
 
     return f"SUCCESS: {total_trades_found} trades found in {filename}."
 
