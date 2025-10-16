@@ -1,4 +1,4 @@
-# app.py (V9 - The Final "Per-Market" Detective UI)
+# app.py (V10 - Final Version with Market Trend Context Chart)
 
 import streamlit as st
 import pandas as pd
@@ -19,10 +19,10 @@ CORE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 DIAMOND_RESULTS_DIR = os.path.join(CORE_DIR, 'diamond_data', 'backtesting_results')
 ZIRCON_RESULTS_DIR = os.path.join(CORE_DIR, 'zircon_data', 'results')
 BLACKLIST_DIR = os.path.join(CORE_DIR, 'platinum_data', 'blacklists')
-# FIX: Correct path to prepared parquet files
 PREPARED_DATA_DIR = os.path.join(CORE_DIR, 'diamond_data', 'prepared_data')
+TRADE_LOGS_DIR = os.path.join(CORE_DIR, 'zircon_data', 'trade_logs') # CORRECTED PATH
 
-# --- Data Loading & Helper Functions (Unchanged from V8) ---
+# --- Data Loading & Helper Functions ---
 @st.cache_data(ttl=600)
 def get_available_reports():
     if not os.path.exists(ZIRCON_RESULTS_DIR): return []
@@ -79,6 +79,29 @@ def load_market_internals(markets):
             price_change = (df['close'].iloc[-1] - df['close'].iloc[0]) / df['close'].iloc[0] * 100
             internals.append({'market': market_name, '% Time in Trend': trend_pct, '% Time High Vol': vol_pct, 'Avg BB Width': avg_bbw, 'Overall Price Change %': price_change})
     return pd.DataFrame(internals)
+
+def parse_dict_col(data_string):
+    try: return ast.literal_eval(str(data_string))
+    except: return {}
+
+@st.cache_data(ttl=3600)
+def load_full_silver_data(market_name):
+    silver_path = os.path.join(PREPARED_DATA_DIR, f"{market_name.replace('.csv','')}_silver.parquet")
+    if os.path.exists(silver_path):
+        df = pd.read_parquet(silver_path, columns=['time', 'close'])
+        df['time'] = pd.to_datetime(df['time'])
+        return df
+    return None
+
+@st.cache_data(ttl=600)
+def load_trade_log(strategy_id, market_name):
+    """Loads the detailed trade log for a specific strategy and market."""
+    log_path = os.path.join(TRADE_LOGS_DIR, strategy_id, f"{market_name.replace('.csv','')}.csv")
+    if os.path.exists(log_path):
+        df = pd.read_csv(log_path)
+        df['entry_time'] = pd.to_datetime(df['entry_time'])
+        return df
+    return None
 
 def parse_dict_col(data_string):
     try: return ast.literal_eval(str(data_string))
@@ -250,3 +273,43 @@ with tab2:
                     st.plotly_chart(fig_internal2, use_container_width=True)
             else:
                 st.warning(f"Could not load Silver data to analyze market internals. Check path: `{PREPARED_DATA_DIR}`")
+            
+            # --- NEW/UPGRADED Section 6: Market Trend Context ---
+            st.subheader("6. Performance in Context: Market Trend")
+            st.info("Visualize individual trades (Green=Win, Red=Loss) overlaid on the market's price history to see how the strategy performs in different macro trends.")
+
+            all_markets_for_strat = []
+            if mastery_data is not None: all_markets_for_strat.append(mastery_data['market'])
+            all_markets_for_strat.extend(validation_data['market'].unique())
+
+            for market_name in sorted(list(set(all_markets_for_strat))):
+                st.markdown(f"#### Trend Context for `{market_name}`")
+                
+                silver_df = load_full_silver_data(market_name)
+                trade_log_df = load_trade_log(strategy_id, market_name)
+
+                if silver_df is None:
+                    st.warning(f"Could not load Silver data for {market_name}."); continue
+                
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=silver_df['time'], y=silver_df['close'], mode='lines', name='Close Price', line=dict(color='rgba(128, 128, 128, 0.5)')))
+
+                if trade_log_df is not None:
+                    wins = trade_log_df[trade_log_df['pnl'] > 0]
+                    losses = trade_log_df[trade_log_df['pnl'] <= 0]
+                    
+                    fig.add_trace(go.Scatter(
+                        x=wins['entry_time'], y=wins['entry_price'],
+                        mode='markers', name='Winning Trades',
+                        marker=dict(color='limegreen', size=8, symbol='triangle-up', line=dict(width=1, color='DarkSlateGrey'))
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=losses['entry_time'], y=losses['entry_price'],
+                        mode='markers', name='Losing Trades',
+                        marker=dict(color='red', size=8, symbol='triangle-down', line=dict(width=1, color='DarkSlateGrey'))
+                    ))
+                else:
+                    st.info(f"Trade log not found for this market. Run the Zircon Validator to generate it.")
+                
+                fig.update_layout(title=f"Trade Entries vs. Market Trend for {market_name}", xaxis_title="Date", yaxis_title="Price")
+                st.plotly_chart(fig, use_container_width=True)
