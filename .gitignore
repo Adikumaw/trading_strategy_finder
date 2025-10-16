@@ -22,5 +22,7 @@ platinum_data/*
 # Ignore all diamond data files
 diamond_data/*
 
+zircon_data/*
+
 # Ignore any csv under the main directory only
 /*.csv
