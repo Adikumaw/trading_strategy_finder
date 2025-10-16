@@ -1,3 +1,5 @@
+# silver_data_generator.py (Upgraded to create chunked_outcomes directly)
+
 import os
 import gc
 import pandas as pd
@@ -150,7 +152,8 @@ def add_positioning_features(merged_chunk):
 
     return merged_chunk
 
-def create_enriched_silver_data(bronze_path, raw_path, features_path, outcomes_path):
+# --- REFACTORED Main execution function ---
+def create_silver_data(bronze_path, raw_path, features_path, chunked_outcomes_dir):
     print(f"\n{'='*25}\nProcessing: {os.path.basename(raw_path)}\n{'='*25}")
 
     # --- STEP 1: Create and Save the Silver Features Dataset ---
@@ -169,22 +172,20 @@ def create_enriched_silver_data(bronze_path, raw_path, features_path, outcomes_p
     features_df.to_csv(features_path, index=False)
     print(f"✅ Silver Features saved to: {features_path}")
     
-    # --- STEP 2: Create the Enriched Silver Outcomes Dataset ---
-    print("\nSTEP 2: Creating ENRICHED Silver Outcomes dataset...")
-    bronze_iterator = pd.read_csv(bronze_path, chunksize=500_000, parse_dates=['entry_time'])
-    is_first_chunk = True
-    os.makedirs(os.path.dirname(outcomes_path), exist_ok=True)
-    if os.path.exists(outcomes_path): os.remove(outcomes_path)
-
-    # Define the columns to keep. All other feature columns will be dropped after merging.
-    # We keep OHLC for context and all indicator levels needed for positioning calculations.
-    indicator_levels = [
-        'support', 'resistance', 'BB_upper', 'BB_lower', 'ATR_level_up_1x', 'ATR_level_down_1x'
-    ] + [f"SMA_{p}" for p in SMA_PERIODS] + [f"EMA_{p}" for p in EMA_PERIODS]
+    # --- STEP 2: Create ENRICHED and CHUNKED Silver Outcomes ---
+    print("\nSTEP 2: Creating ENRICHED and CHUNKED Silver Outcomes...")
     
+    # NEW: Create the specific output directory for this instrument's chunks
+    os.makedirs(chunked_outcomes_dir, exist_ok=True)
+    
+    # Use a chunksize for reading the huge bronze file
+    bronze_iterator = pd.read_csv(bronze_path, chunksize=500_000, parse_dates=['entry_time'])
+    
+    indicator_levels = ['support', 'resistance', 'BB_upper', 'BB_lower', 'ATR_level_up_1x', 'ATR_level_down_1x'] + [f"SMA_{p}" for p in SMA_PERIODS] + [f"EMA_{p}" for p in EMA_PERIODS]
     cols_to_keep = ['time', 'open', 'high', 'low', 'close'] + indicator_levels
-
-    for chunk in tqdm(bronze_iterator, desc="Enriching Bronze Chunks"):
+    
+    chunk_counter = 1
+    for chunk in tqdm(bronze_iterator, desc="  Enriching Bronze Chunks"):
         chunk = chunk[chunk['entry_time'] >= features_df['time'].min()]
         if chunk.empty: continue
         
@@ -204,36 +205,42 @@ def create_enriched_silver_data(bronze_path, raw_path, features_path, outcomes_p
         
         if not enriched_chunk.empty:
             enriched_chunk = downcast_dtypes(enriched_chunk)
-            enriched_chunk.to_csv(outcomes_path, mode='a', header=is_first_chunk, index=False)
-            is_first_chunk = False
+            
+            # NEW: Save directly to the chunked outcomes directory
+            chunk_output_path = os.path.join(chunked_outcomes_dir, f"chunk_{chunk_counter}.csv")
+            enriched_chunk.to_csv(chunk_output_path, index=False)
+            chunk_counter += 1
             
     del features_df; gc.collect()
-    print(f"✅ Enriched Silver Outcomes saved to: {outcomes_path}")
+    print(f"✅ Enriched and chunked Silver Outcomes saved to: {chunked_outcomes_dir}")
 
 if __name__ == "__main__":
     core_dir = os.path.dirname(os.path.abspath(__file__))
     raw_dir, bronze_dir = [os.path.abspath(os.path.join(core_dir, '..', d)) for d in ['raw_data', 'bronze_data']]
     features_dir = os.path.abspath(os.path.join(core_dir, '..', 'silver_data', 'features'))
-    outcomes_dir = os.path.abspath(os.path.join(core_dir, '..', 'silver_data', 'outcomes'))
+    # NEW: Define the chunked outcomes directory as the primary output
+    chunked_outcomes_dir = os.path.abspath(os.path.join(core_dir, '..', 'silver_data', 'chunked_outcomes'))
     
-    os.makedirs(features_dir, exist_ok=True); os.makedirs(outcomes_dir, exist_ok=True)
+    os.makedirs(features_dir, exist_ok=True); os.makedirs(chunked_outcomes_dir, exist_ok=True)
 
     bronze_files = [f for f in os.listdir(bronze_dir) if f.endswith('.csv')]
     if not bronze_files: print("❌ No bronze files found to process.")
     else:
         for fname in bronze_files:
+            instrument_name = fname.replace('.csv', '')
             bronze_path, raw_path = [os.path.join(d, fname) for d in [bronze_dir, raw_dir]]
-            features_path, outcomes_path = [os.path.join(d, fname) for d in [features_dir, outcomes_dir]]
+            features_path = os.path.join(features_dir, fname)
+            # NEW: The output directory is now specific to the instrument
+            instrument_chunked_outcomes_dir = os.path.join(chunked_outcomes_dir, instrument_name)
             
             if not os.path.exists(raw_path):
-                print(f"⚠️ SKIPPING: Raw file for {fname} not found."); continue
+                print(f"⚠️ SKIPPING {fname}: Raw file not found."); continue
             
-            # Simple check to skip already processed files
-            if os.path.exists(outcomes_path):
-                print(f"✅ SKIPPING: Silver outcomes file for {fname} already exists."); continue
+            if os.path.exists(instrument_chunked_outcomes_dir):
+                print(f"✅ SKIPPING {fname}: Chunked outcomes directory already exists."); continue
             
             try:
-                create_enriched_silver_data(bronze_path, raw_path, features_path, outcomes_path)
+                create_silver_data(bronze_path, raw_path, features_path, instrument_chunked_outcomes_dir)
             except Exception as e:
                 print(f"❌ FAILED to process {fname}. Error: {e}")
                 import traceback
