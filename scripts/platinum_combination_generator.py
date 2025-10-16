@@ -1,3 +1,5 @@
+# platinum_combinations_generator.py (Updated for chunked_outcomes)
+
 import pandas as pd
 import os
 import numpy as np
@@ -5,37 +7,41 @@ from tqdm import tqdm
 import itertools
 import gc
 
-# --- CONFIGURATION ---
-OUTCOMES_CHUNK_SIZE = 500_000
+# --- CONFIGURATION (No longer needs OUTCOMES_CHUNK_SIZE) ---
 
-def generate_strategy_definitions(outcomes_path):
+def generate_strategy_definitions(chunked_outcomes_dir):
     """
-    Scans the outcomes file to generate all actionable strategy definitions,
-    now including binned percentage-based placements.
+    Scans a directory of pre-chunked outcome files to generate all actionable 
+    strategy definitions, including directional binned placements.
     """
-    print("Scanning outcomes to generate binned and ratio-based strategy definitions...")
+    print("Scanning chunked outcomes to generate binned strategy definitions...")
     
-    # Use sets for efficiency
     semi_tp_binned_combos = set()
     semi_sl_binned_combos = set()
-    dynamic_binned_combos = set()
     
-    outcomes_iterator = pd.read_csv(outcomes_path, chunksize=OUTCOMES_CHUNK_SIZE)
-    
-    # Discover all placement levels from the header
-    header_df = pd.read_csv(outcomes_path, nrows=0)
+    try:
+        chunk_files = [os.path.join(chunked_outcomes_dir, f) for f in os.listdir(chunked_outcomes_dir) if f.endswith('.csv')]
+        if not chunk_files:
+            print("❌ No chunk files found in the directory.")
+            return pd.DataFrame()
+    except FileNotFoundError:
+        print(f"❌ Chunk directory not found: {chunked_outcomes_dir}")
+        return pd.DataFrame()
+
+    # Discover all placement levels from the header of the first chunk
+    header_df = pd.read_csv(chunk_files[0], nrows=0)
     placement_cols = sorted([c.replace('sl_placement_pct_to_', '') 
                              for c in header_df.columns 
                              if c.startswith('sl_placement_pct_to_')])
 
     print(f"Found {len(placement_cols)} potential placement levels to bin.")
 
-    # Define the binning function: 0-10% -> 0, 10-20% -> 1, etc.
-    # We will only consider placements between 0% and 200% (bins 0 to 19)
     def to_bin(series):
         return np.floor(series * 10).astype('Int64')
 
-    for chunk in tqdm(outcomes_iterator, desc="Scanning for Binned Combinations"):
+    # Iterate through the pre-made chunk files
+    for chunk_path in tqdm(chunk_files, desc="Scanning for Combinations"):
+        chunk = pd.read_csv(chunk_path)
         chunk['sl_ratio'] = chunk['sl_ratio'].round(5)
         chunk['tp_ratio'] = chunk['tp_ratio'].round(5)
             
@@ -43,28 +49,19 @@ def generate_strategy_definitions(outcomes_path):
             sl_pct_col = f"sl_placement_pct_to_{level}"
             tp_pct_col = f"tp_placement_pct_to_{level}"
 
-            # --- Generate Binned Definitions ---
             if sl_pct_col in chunk.columns:
                 chunk['sl_bin'] = to_bin(chunk[sl_pct_col])
-                # Filter for valid bins (0 to 19, representing 0% to 200%)
-                sl_binned_chunk = chunk[(chunk['sl_bin'] >= 0) & (chunk['sl_bin'] < 20)]
-                
-                # Semi-Dynamic (SL Binned, TP Ratio)
+                # Correctly filter for directional bins
+                sl_binned_chunk = chunk[(chunk['sl_bin'] >= -10) & (chunk['sl_bin'] < 20)]
                 for combo in sl_binned_chunk[['tp_ratio', 'sl_bin']].drop_duplicates().itertuples(index=False):
                     semi_sl_binned_combos.add((level, combo.sl_bin, combo.tp_ratio))
 
             if tp_pct_col in chunk.columns:
                 chunk['tp_bin'] = to_bin(chunk[tp_pct_col])
-                tp_binned_chunk = chunk[(chunk['tp_bin'] >= 0) & (chunk['tp_bin'] < 20)]
-
-                # Semi-Dynamic (TP Binned, SL Ratio)
+                tp_binned_chunk = chunk[(chunk['tp_bin'] >= -10) & (chunk['tp_bin'] < 20)]
                 for combo in tp_binned_chunk[['sl_ratio', 'tp_bin']].drop_duplicates().itertuples(index=False):
                     semi_tp_binned_combos.add((level, combo.tp_bin, combo.sl_ratio))
-        
-        # Fully-Dynamic (both SL and TP are binned)
-        # This is complex and computationally expensive, can be added later if needed.
-
-    # --- Convert sets to a final DataFrame ---
+    
     definitions = []
     for sl_level, sl_bin, tp_ratio in semi_sl_binned_combos:
         definitions.append({'type': 'Semi-Dynamic-SL-Binned', 'sl_def': sl_level, 'sl_bin': sl_bin, 'tp_def': tp_ratio, 'tp_bin': np.nan})
@@ -78,35 +75,42 @@ def generate_strategy_definitions(outcomes_path):
 
 if __name__ == "__main__":
     core_dir = os.path.dirname(os.path.abspath(__file__))
-    silver_outcomes_dir = os.path.abspath(os.path.join(core_dir, '..', 'silver_data', 'outcomes'))
+    # NEW: Point to the parent directory of the instrument-specific chunk folders
+    chunked_outcomes_parent_dir = os.path.abspath(os.path.join(core_dir, '..', 'silver_data', 'chunked_outcomes'))
     combinations_dir = os.path.abspath(os.path.join(core_dir, '..', 'platinum_data', 'combinations'))
     os.makedirs(combinations_dir, exist_ok=True)
 
-    outcome_files = [f for f in os.listdir(silver_outcomes_dir) if f.endswith('.csv')]
+    try:
+        # Get the list of instrument folders (e.g., 'AUDUSD1', 'EURUSD15')
+        instrument_folders = [d for d in os.listdir(chunked_outcomes_parent_dir) if os.path.isdir(os.path.join(chunked_outcomes_parent_dir, d))]
+    except FileNotFoundError:
+        print(f"❌ Source directory not found: {chunked_outcomes_parent_dir}"); instrument_folders = []
 
-    if not outcome_files:
-        print("❌ No silver outcome files found to generate combinations from.")
+    if not instrument_folders:
+        print("❌ No instrument chunk folders found in 'silver_data/chunked_outcomes'.")
     else:
-        for fname in outcome_files:
-            outcomes_path = os.path.join(silver_outcomes_dir, fname)
-            definitions_path = os.path.join(combinations_dir, fname)
+        for instrument_name in instrument_folders:
+            # The input is now the directory for a specific instrument's chunks
+            instrument_chunk_dir = os.path.join(chunked_outcomes_parent_dir, instrument_name)
+            # The output filename is based on the instrument name
+            definitions_path = os.path.join(combinations_dir, f"{instrument_name}.csv")
 
             if os.path.exists(definitions_path):
-                print(f"ℹ️ Combinations file already exists for {fname}. Skipping generation.")
+                print(f"ℹ️ Combinations file already exists for {instrument_name}. Skipping generation.")
                 continue
 
             try:
-                print(f"\n{'='*25}\nGenerating combinations for: {fname}\n{'='*25}")
-                strategy_definitions = generate_strategy_definitions(outcomes_path)
+                print(f"\n{'='*25}\nGenerating combinations for: {instrument_name}\n{'='*25}")
+                strategy_definitions = generate_strategy_definitions(instrument_chunk_dir)
 
                 if not strategy_definitions.empty:
                     strategy_definitions.to_csv(definitions_path, index=False)
-                    print(f"\n✅ Success! Generated and saved {len(strategy_definitions)} strategy definitions to: {definitions_path}")
+                    print(f"\n✅ Success! Saved {len(strategy_definitions)} combinations to: {definitions_path}")
                 else:
-                    print("\nℹ️ No valid dynamic combinations were found that met the tolerance criteria.")
+                    print("\nℹ️ No valid combinations were found.")
 
             except Exception as e:
-                print(f"\n❌ FAILED to process {fname}. Error: {e}")
+                print(f"\n❌ FAILED to process {instrument_name}. Error: {e}")
                 import traceback
                 traceback.print_exc()
 
