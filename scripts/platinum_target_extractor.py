@@ -1,20 +1,27 @@
-# platinum_target_extractor.py (Corrected for User Experience)
+# platinum_target_extractor.py (Upgraded with Key Persistence)
 
 """
 Platinum Layer - Stage 2: The Target Extractor (The Pre-Processor)
 
 This script is the heavy-lifting, "map-reduce" style pre-processing engine of
-the Platinum layer. Its primary purpose is to solve a major I/O bottleneck.
+the Platinum layer. Its primary purpose is to solve a major I/O bottleneck by
+pre-computing all necessary data for the final discovery stage.
 
-Instead of requiring the final ML script to read a multi-gigabyte data file
-thousands of times (once for each strategy blueprint), this script pre-computes
-all the necessary data. It iterates through each strategy blueprint and extracts
-its corresponding "target variable" — the count of successful trades per candle
-(`trade_count`).
+The script operates in two main phases for each instrument:
+1.  Key Generation: It first loads the master list of strategy blueprints from
+    the `combinations` file. For each blueprint, it generates a unique hash key
+    (e.g., 'a1b2c3d4e5f6g7h8'). This key will serve as the filename for that
+    blueprint's target data.
 
-The output is thousands of tiny, fast-loading CSV files, one for each unique
-strategy blueprint. This massive pre-computation shifts the workload to an
-offline, parallelizable task, making the final discovery stage incredibly fast.
+2.  Target Extraction: Using multiple CPU cores, it reads the Silver layer's
+    data chunks ONCE. For each chunk, it finds all trades that match every single
+    blueprint and calculates the `trade_count` per candle. These results are
+    appended to the corresponding key's file.
+
+After processing, it saves the blueprint-to-key mapping back to the original
+`combinations` file. This creates a "single source of truth," making it simple
+for the next script to link a specific strategy to its pre-computed target data,
+enabling incredibly fast final analysis.
 """
 
 import pandas as pd
@@ -37,7 +44,8 @@ MAX_CPU_USAGE = max(1, cpu_count() - 2)
 def filter_chunk_for_definition(chunk, definition):
     """
     Filters a DataFrame chunk to find all trades that match a specific
-    strategy blueprint (definition).
+    strategy blueprint (definition). This function is generic and supports
+    static, semi-dynamic, and fully-dynamic strategy types.
 
     Args:
         chunk (pd.DataFrame): A chunk of enriched trade data.
@@ -46,7 +54,9 @@ def filter_chunk_for_definition(chunk, definition):
     Returns:
         pd.DataFrame: A filtered DataFrame containing only matching trades.
     """
+    # Start with the full chunk and progressively filter it down.
     temp_df = chunk
+    
     # --- Filter based on Stop-Loss definition ---
     if isinstance(definition['sl_def'], str):
         # Case 1: SL is dynamically defined by a binned distance to a level.
@@ -82,7 +92,8 @@ def process_chunk_for_all_definitions(chunk_path, all_definitions, target_dir, d
 
     Args:
         chunk_path (str): Path to the single chunk CSV file to process.
-        all_definitions (pd.DataFrame): The master list of all strategy blueprints.
+        all_definitions (pd.DataFrame): The master list of all strategy blueprints,
+                                        which MUST include the 'key' column.
         target_dir (str): The output directory for the target files.
         dtype_map (dict): A mapping of column names to dtypes for efficient loading.
 
@@ -101,7 +112,7 @@ def process_chunk_for_all_definitions(chunk_path, all_definitions, target_dir, d
         slice_df = filter_chunk_for_definition(chunk_df, definition)
         if not slice_df.empty:
             # Aggregate the results to find the trade count for each entry timestamp.
-            # This becomes the 'y' variable for the ML model.
+            # This becomes the 'y' variable (target) for the ML model.
             agg_df = slice_df.groupby('entry_time').agg(trade_count=('outcome', 'size')).reset_index()
             key = definition['key']
             if key not in appends:
@@ -158,23 +169,33 @@ if __name__ == "__main__":
             if not os.path.exists(instrument_chunk_dir):
                 print(f"❌ Chunks not found for {instrument_name}. Run silver_data_generator first."); continue
             
-            # --- Resumability Check ---
-            if os.path.exists(instrument_target_dir) and len(os.listdir(instrument_target_dir)) > 0:
-                print(f"✅ Targets already seem to be extracted for {instrument_name}. Skipping."); continue
+            # --- Prepare Definitions and Keys ---
+            all_definitions = pd.read_csv(combinations_path)
+            
+            # --- ROBUST RESUMABILITY CHECK ---
+            # If the 'key' column already exists, this script has successfully run
+            # before. We can safely skip this instrument.
+            if 'key' in all_definitions.columns:
+                print(f"✅ Keys already exist in {fname}. Targets presumed extracted. Skipping.")
+                continue
 
             os.makedirs(instrument_target_dir, exist_ok=True)
             
-            # --- Prepare Definitions ---
-            all_definitions = pd.read_csv(combinations_path)
-            # Ensure correct dtypes for filtering logic
+            # Ensure correct dtypes for filtering logic and hashing
             all_definitions['sl_def'] = all_definitions['sl_def'].astype(object)
             all_definitions['tp_def'] = all_definitions['tp_def'].astype(object)
             if 'sl_bin' in all_definitions.columns: all_definitions['sl_bin'] = all_definitions['sl_bin'].astype('Int64')
             if 'tp_bin' in all_definitions.columns: all_definitions['tp_bin'] = all_definitions['tp_bin'].astype('Int64')
             
-            # Create a unique hash key for each definition. This key becomes the filename.
+            # --- Generate the Unique Key for Each Blueprint ---
+            # This key will be used as the filename for the target CSV.
+            # Using a separator and a consistent NaN representation makes the hash robust.
             key_cols = ['type', 'sl_def', 'sl_bin', 'tp_def', 'tp_bin']
-            all_definitions['key'] = all_definitions[key_cols].astype(str).sum(axis=1).apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
+            def create_hashable_string(row):
+                return '-'.join([str(row[c]) for c in key_cols])
+                
+            all_definitions['key'] = all_definitions.apply(create_hashable_string, axis=1)\
+                                                    .apply(lambda x: hashlib.sha256(x.encode()).hexdigest()[:16]) # Truncate for shorter filenames
 
             chunk_files = [os.path.join(instrument_chunk_dir, f) for f in os.listdir(instrument_chunk_dir) if f.endswith('.csv')]
             
@@ -188,19 +209,23 @@ if __name__ == "__main__":
             effective_num_processes = min(num_processes, len(chunk_files))
             print(f"\n🚀 Starting extraction with {effective_num_processes} worker(s)...")
             
-            # `partial` pre-fills the worker function with arguments that are the
-            # same for every chunk, which is a clean way to use multiprocessing.
             func = partial(process_chunk_for_all_definitions, all_definitions=all_definitions, target_dir=instrument_target_dir, dtype_map=dtype_map)
 
             if effective_num_processes > 1:
                 with Pool(processes=effective_num_processes) as pool:
-                    # `imap_unordered` is memory-efficient and `tqdm` provides a progress bar.
                     list(tqdm(pool.imap_unordered(func, chunk_files), total=len(chunk_files), desc="Processing Chunks"))
             else:
-                # Run sequentially if only one process is requested.
                 for chunk_file in tqdm(chunk_files, desc="Processing Chunks"):
                     func(chunk_file)
-
-            print(f"\n✅ Target extraction complete for {instrument_name}.")
+            
+            # --- Save the Keys Back to the Combinations File ---
+            # This is the crucial step that creates the "single source of truth".
+            # The next script will read this file and know exactly which key
+            # belongs to which strategy blueprint.
+            try:
+                all_definitions.to_csv(combinations_path, index=False)
+                print(f"\n✅ Target extraction complete and keys saved back to {fname}.")
+            except Exception as e:
+                print(f"\n❌ FAILED to save keys back to {fname}. Error: {e}")
 
     print("\n" + "="*50 + "\n✅ All target extraction complete.")
