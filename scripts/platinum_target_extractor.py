@@ -32,6 +32,7 @@ import gc
 import hashlib
 from multiprocessing import Pool, cpu_count
 from functools import partial
+import sys # <-- IMPORT SYS MODULE
 
 # --- CONFIGURATION ---
 
@@ -144,6 +145,16 @@ def process_chunk_for_all_definitions(chunk_path, all_definitions, target_dir, d
     return chunk_path
 
 if __name__ == "__main__":
+    """
+    Main execution block.
+    
+    This script can be run in two modes:
+    1. Discovery Mode (no arguments): Scans for all new combination files and processes them.
+       Example: `python scripts/platinum_target_extractor.py`
+       
+    2. Targeted Mode (one argument): Processes only the single file specified.
+       Example: `python scripts/platinum_target_extractor.py XAUUSD15.csv`
+    """
     # --- Define Project Directory Structure ---
     core_dir = os.path.dirname(os.path.abspath(__file__))
     combinations_dir = os.path.abspath(os.path.join(core_dir, '..', 'platinum_data', 'combinations'))
@@ -151,28 +162,53 @@ if __name__ == "__main__":
     targets_dir = os.path.abspath(os.path.join(core_dir, '..', 'platinum_data', 'targets'))
     os.makedirs(targets_dir, exist_ok=True)
 
-    try:
-        combination_files = [f for f in os.listdir(combinations_dir) if f.endswith('.csv')]
-    except FileNotFoundError:
-        print(f"❌ Directory not found: {combinations_dir}"); combination_files = []
+    # --- NEW: DUAL-MODE FILE DISCOVERY LOGIC ---
+    target_file_arg = sys.argv[1] if len(sys.argv) > 1 else None
 
-    if not combination_files:
-        print("❌ No combination files found.")
+    if target_file_arg:
+        # --- Targeted Mode ---
+        print(f"🎯 Targeted Mode: Processing single file '{target_file_arg}'")
+        combinations_path_check = os.path.join(combinations_dir, target_file_arg)
+        if not os.path.exists(combinations_path_check):
+            print(f"❌ Error: Target file not found in platinum_data/combinations: {target_file_arg}")
+            files_to_process = []
+        else:
+            files_to_process = [target_file_arg]
     else:
-        # --- UX FIX: Ask for multiprocessing settings ONCE at the start ---
-        print(f"Found {len(combination_files)} instrument(s) to process.")
-        use_multiprocessing = input("Use multiprocessing for each instrument? (y/n): ").strip().lower() == 'y'
+        # --- Discovery Mode (Default) ---
+        print("🔍 Discovery Mode: Scanning for all new files...")
+        try:
+            combination_files = [f for f in os.listdir(combinations_dir) if f.endswith('.csv')]
+            # Check which files already have the 'key' column added, indicating they are processed.
+            files_to_process = []
+            for f in combination_files:
+                try:
+                    df = pd.read_csv(os.path.join(combinations_dir, f), nrows=0)
+                    if 'key' not in df.columns:
+                        files_to_process.append(f)
+                except Exception:
+                    files_to_process.append(f) # Process if file is empty or unreadable
+        except FileNotFoundError:
+            print(f"❌ Directory not found: {combinations_dir}"); files_to_process = []
+
+    if not files_to_process:
+        print("ℹ️ No new combination files found to process.")
+    else:
+        print(f"Found {len(files_to_process)} instrument(s) to process.")
+        
+        # --- Configure Multiprocessing ---
+        if target_file_arg or len(files_to_process) == 1:
+            use_multiprocessing = True
+        else:
+            use_multiprocessing = input("Use multiprocessing for each instrument? (y/n): ").strip().lower() == 'y'
+        
         if use_multiprocessing:
             num_processes = MAX_CPU_USAGE
         else:
-            try:
-                num_processes = int(input(f"Enter number of processes to use per instrument (1-{cpu_count()}): ").strip())
-                if num_processes < 1 or num_processes > cpu_count(): raise ValueError
-            except ValueError:
-                print("Invalid input. Defaulting to 1 process."); num_processes = 1
+            num_processes = 1
 
         # --- Main loop: Process each instrument ---
-        for fname in combination_files:
+        for fname in files_to_process:
             print(f"\n{'='*25}\nExtracting targets for: {fname}\n{'='*25}")
             instrument_name = fname.replace('.csv', '')
             
@@ -186,9 +222,7 @@ if __name__ == "__main__":
             # --- Prepare Definitions and Keys ---
             all_definitions = pd.read_csv(combinations_path)
             
-            # --- ROBUST RESUMABILITY CHECK ---
-            # If the 'key' column already exists, this script has successfully run
-            # before. We can safely skip this instrument.
+            # This check is now inside the loop, specific to each file.
             if 'key' in all_definitions.columns:
                 print(f"✅ Keys already exist in {fname}. Targets presumed extracted. Skipping.")
                 continue
@@ -209,11 +243,14 @@ if __name__ == "__main__":
                 return '-'.join([str(row[c]) for c in key_cols])
                 
             all_definitions['key'] = all_definitions.apply(create_hashable_string, axis=1)\
-                                                    .apply(lambda x: hashlib.sha256(x.encode()).hexdigest()[:16]) # Truncate for shorter filenames
+                                                    .apply(lambda x: hashlib.sha256(x.encode()).hexdigest()[:16])
 
             chunk_files = [os.path.join(instrument_chunk_dir, f) for f in os.listdir(instrument_chunk_dir) if f.endswith('.csv')]
+            if not chunk_files:
+                print(f"⚠️ No chunk files found in {instrument_chunk_dir} to process. Skipping target extraction.")
+                continue
             
-            # --- Memory Optimization: Analyze dtypes before loading all chunks ---
+            # --- Memory Optimization: Analyze dtypes ---
             print("Analyzing column types for memory-efficient loading...")
             temp_df = pd.read_csv(chunk_files[0], nrows=1)
             dtype_map = {col: 'float32' for col in temp_df.columns if col not in ['entry_time', 'exit_time', 'trade_type', 'outcome']}

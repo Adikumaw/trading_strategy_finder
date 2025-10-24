@@ -29,6 +29,7 @@ import numpy as np
 from tqdm import tqdm
 import itertools
 import gc
+import sys # <-- IMPORT SYS MODULE
 
 # --- CONFIGURATION (No specific configuration needed for this script) ---
 
@@ -187,36 +188,60 @@ def generate_strategy_definitions(chunked_outcomes_dir):
     return pd.DataFrame(definitions).drop_duplicates().reset_index(drop=True)
 
 if __name__ == "__main__":
+    """
+    Main execution block.
+    
+    This script can be run in two modes:
+    1. Discovery Mode (no arguments): Scans for all new instrument folders and processes them.
+       Example: `python scripts/platinum_combinations_generator.py`
+       
+    2. Targeted Mode (one argument): Processes only the single instrument specified.
+       Example: `python scripts/platinum_combinations_generator.py XAUUSD15.csv`
+    """
     # --- Define Project Directory Structure ---
     core_dir = os.path.dirname(os.path.abspath(__file__))
-    # Input: The parent directory containing all instrument-specific chunk folders
     chunked_outcomes_parent_dir = os.path.abspath(os.path.join(core_dir, '..', 'silver_data', 'chunked_outcomes'))
-    # Output: The directory where the master combination lists will be saved
     combinations_dir = os.path.abspath(os.path.join(core_dir, '..', 'platinum_data', 'combinations'))
     os.makedirs(combinations_dir, exist_ok=True)
 
-    try:
-        # Get the list of instrument folders (e.g., 'XAUUSD15', 'EURUSD60')
-        instrument_folders = [d for d in os.listdir(chunked_outcomes_parent_dir) if os.path.isdir(os.path.join(chunked_outcomes_parent_dir, d))]
-    except FileNotFoundError:
-        print(f"❌ Source directory not found: {chunked_outcomes_parent_dir}")
-        instrument_folders = []
-
-    if not instrument_folders:
-        print("❌ No instrument chunk folders found in 'silver_data/chunked_outcomes'.")
+    # --- NEW: DUAL-MODE FILE DISCOVERY LOGIC ---
+    target_file_arg = sys.argv[1] if len(sys.argv) > 1 else None
+    
+    if target_file_arg:
+        # --- Targeted Mode ---
+        instrument_name = target_file_arg.replace('.csv', '')
+        print(f"🎯 Targeted Mode: Processing single instrument folder '{instrument_name}'")
+        instrument_chunk_dir_check = os.path.join(chunked_outcomes_parent_dir, instrument_name)
+        if not os.path.isdir(instrument_chunk_dir_check):
+            print(f"❌ Error: Target instrument folder not found in silver_data/chunked_outcomes: {instrument_name}")
+            instrument_folders_to_process = []
+        else:
+            instrument_folders_to_process = [instrument_name]
     else:
+        # --- Discovery Mode (Default) ---
+        print("🔍 Discovery Mode: Scanning for all new instrument folders...")
+        try:
+            all_instrument_folders = [d for d in os.listdir(chunked_outcomes_parent_dir) if os.path.isdir(os.path.join(chunked_outcomes_parent_dir, d))]
+            # Check which folders already have a corresponding combinations file
+            instrument_folders_to_process = []
+            for inst_name in all_instrument_folders:
+                definitions_path_check = os.path.join(combinations_dir, f"{inst_name}.csv")
+                if not os.path.exists(definitions_path_check):
+                    instrument_folders_to_process.append(inst_name)
+        except FileNotFoundError:
+            print(f"❌ Source directory not found: {chunked_outcomes_parent_dir}")
+            instrument_folders_to_process = []
+
+    if not instrument_folders_to_process:
+        print("ℹ️ No new instrument folders found to process.")
+    else:
+        print(f"Found {len(instrument_folders_to_process)} instrument folder(s) to process...")
         # --- Main Loop: Process each instrument folder ---
-        for instrument_name in instrument_folders:
+        for instrument_name in instrument_folders_to_process:
             # The input is the specific directory for this instrument's chunks
             instrument_chunk_dir = os.path.join(chunked_outcomes_parent_dir, instrument_name)
             # The output filename is based on the instrument name
             definitions_path = os.path.join(combinations_dir, f"{instrument_name}.csv")
-
-            # --- Resumability Check ---
-            # Skip generation if the output file already exists.
-            if os.path.exists(definitions_path):
-                print(f"ℹ️ Combinations file already exists for {instrument_name}. Skipping generation.")
-                continue
 
             try:
                 print(f"\n{'='*25}\nGenerating combinations for: {instrument_name}\n{'='*25}")
@@ -226,7 +251,7 @@ if __name__ == "__main__":
                     strategy_definitions.to_csv(definitions_path, index=False)
                     print(f"\n✅ Success! Saved {len(strategy_definitions)} combinations to: {definitions_path}")
                 else:
-                    print("\nℹ️ No valid combinations were found for this instrument.")
+                    print(f"\nℹ️ No valid combinations were found for {instrument_name}.")
 
             except Exception as e:
                 print(f"\n❌ FAILED to process {instrument_name}. Error: {e}")

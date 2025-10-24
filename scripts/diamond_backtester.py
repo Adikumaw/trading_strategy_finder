@@ -30,6 +30,7 @@ from tqdm import tqdm
 import re
 from functools import partial
 from multiprocessing import Pool, cpu_count
+import sys # <-- IMPORT SYS MODULE
 
 # --- CONFIGURATION ---
 
@@ -229,26 +230,52 @@ def run_backtest_for_strategy(strategy_dict, market_data_cache, origin_market_cs
     return None
 
 if __name__ == "__main__":
+    """
+    Main execution block.
+    
+    Can be run in two modes:
+    1. Interactive Mode (no arguments): Presents a menu to choose a strategy file.
+       Example: `python scripts/diamond_backtester.py`
+       
+    2. Targeted Mode (one argument): Directly processes the specified strategy file.
+       Example: `python scripts/diamond_backtester.py XAUUSD15.csv`
+    """
     core_dir = os.path.dirname(os.path.abspath(__file__))
     discovered_dir, prepared_data_dir, backtest_results_dir, blacklist_dir, zircon_input_dir = [os.path.abspath(os.path.join(core_dir, '..', d)) for d in ['platinum_data/discovered_strategy', 'diamond_data/prepared_data', 'diamond_data/backtesting_results', 'platinum_data/blacklists', 'zircon_data/input']]
     for d in [backtest_results_dir, blacklist_dir, zircon_input_dir]: os.makedirs(d, exist_ok=True)
     
-    strategy_files = [f for f in os.listdir(discovered_dir) if f.endswith('.csv')]
-    if not strategy_files: print("❌ No discovered strategy files found."); exit()
-    print("--- Select a Strategy File to Backtest ---")
-    for i, f in enumerate(strategy_files): print(f"  [{i+1}] {f}")
-    try:
-        choice = int(input(f"Enter number (1-{len(strategy_files)}): ")) - 1
-        strategy_file_to_test = strategy_files[choice]
-    except (ValueError, IndexError): print("❌ Invalid selection. Exiting."); exit()
+    # --- NEW: DUAL-MODE FILE SELECTION LOGIC ---
+    target_file_arg = sys.argv[1] if len(sys.argv) > 1 else None
+    strategy_file_to_test = None
 
+    if target_file_arg:
+        # --- Targeted Mode ---
+        print(f"🎯 Targeted Mode: Processing single file '{target_file_arg}'")
+        if not os.path.exists(os.path.join(discovered_dir, target_file_arg)):
+            print(f"❌ Error: Target file not found in platinum_data/discovered_strategy: {target_file_arg}"); sys.exit(1)
+        strategy_file_to_test = target_file_arg
+    else:
+        # --- Interactive Mode ---
+        strategy_files = [f for f in os.listdir(discovered_dir) if f.endswith('.csv')]
+        if not strategy_files: print("❌ No discovered strategy files found."); sys.exit(1)
+        
+        print("--- Select a Strategy File to Backtest ---")
+        for i, f in enumerate(strategy_files): print(f"  [{i+1}] {f}")
+        try:
+            choice = int(input(f"Enter number (1-{len(strategy_files)}): ")) - 1
+            if not 0 <= choice < len(strategy_files): raise ValueError
+            strategy_file_to_test = strategy_files[choice]
+        except (ValueError, IndexError):
+            print("❌ Invalid selection. Exiting."); sys.exit(1)
+
+    # --- Proceed with the selected file ---
     origin_market_csv = strategy_file_to_test
     origin_market_name = origin_market_csv.replace('.csv', '')
     
     discovered_path = os.path.join(discovered_dir, strategy_file_to_test)
     strategies_df_full = pd.read_csv(discovered_path, dtype={'sl_def': object, 'tp_def': object, 'key': str})
     if 'key' not in strategies_df_full.columns:
-        print(f"❌ FATAL: 'key' column not found in {strategy_file_to_test}. Please re-run the Platinum discoverer."); exit()
+        print(f"❌ FATAL: 'key' column not found in {strategy_file_to_test}. Please re-run the Platinum discoverer."); sys.exit(1)
     
     def to_numeric_or_str(x):
         try: return float(x)
@@ -263,12 +290,24 @@ if __name__ == "__main__":
     strategies_df_full['strategy_id'] = strategies_df_full['key'] + '_' + strategies_df_full['market_rule']
 
     print(f"\nFound {len(strategies_df_full)} total strategies in {strategy_file_to_test}.")
-    try:
-        top_n_input = input(f"How many top strategies per rule to test? (Default: {TOP_N_PER_RULE}): ").strip()
-        TOP_N_PER_RULE = int(top_n_input) if top_n_input else TOP_N_PER_RULE
-    except ValueError: print(f"Invalid number. Defaulting to {TOP_N_PER_RULE}.")
-    strategies_df = strategies_df_full.groupby('market_rule').head(TOP_N_PER_RULE)
+    
+    # In targeted mode, don't ask for TOP_N, just use the default.
+    if target_file_arg:
+        final_top_n = TOP_N_PER_RULE
+        use_multiprocessing = True
+        print(f"Using default TOP_N: {final_top_n} and enabling multiprocessing for automated run.")
+    else:
+        try:
+            top_n_input = input(f"How many top strategies per rule to test? (Default: {TOP_N_PER_RULE}): ").strip()
+            final_top_n = int(top_n_input) if top_n_input else TOP_N_PER_RULE
+        except ValueError:
+            print(f"Invalid number. Defaulting to {TOP_N_PER_RULE}.")
+            final_top_n = TOP_N_PER_RULE
+        use_multiprocessing = input("Use multiprocessing? (y/n): ").strip().lower() == 'y'
 
+    strategies_df = strategies_df_full.groupby('market_rule').head(final_top_n)
+
+    # --- Resumability & Execution Logic (remains the same) ---
     detailed_report_path = os.path.join(backtest_results_dir, f"diamond_report_{origin_market_name}.csv")
     processed_log_path = os.path.join(backtest_results_dir, f".{origin_market_name}.processed_log")
     try:
@@ -280,10 +319,10 @@ if __name__ == "__main__":
         print(f"\nStarting new backtest with {len(strategies_to_test)} strategies.")
 
     if not strategies_to_test.empty:
+        # ... (the rest of the backtesting logic remains exactly the same) ...
         print("\nLoading prepared market data...")
         market_data_cache = {origin_market_csv: {'silver': pd.read_parquet(os.path.join(prepared_data_dir, f"{origin_market_name}_silver.parquet")), 'gold': pd.read_parquet(os.path.join(prepared_data_dir, f"{origin_market_name}_gold.parquet"))}}
         
-        use_multiprocessing = input("Use multiprocessing? (y/n): ").strip().lower() == 'y'
         num_processes = MAX_CPU_USAGE if use_multiprocessing else 1
         strategy_list = strategies_to_test.to_dict('records')
         
@@ -308,6 +347,7 @@ if __name__ == "__main__":
             if temp_results: pd.DataFrame(temp_results).to_csv(detailed_report_path, mode='a', header=not os.path.exists(detailed_report_path), index=False)
             if pool: pool.close(); pool.join()
 
+    # --- Final Cleanup Logic (remains the same) ---
     print("\nBacktesting finished. Performing final cleanup...")
     try:
         results_df = pd.read_csv(detailed_report_path)
@@ -325,7 +365,7 @@ if __name__ == "__main__":
             existing_zircon = pd.read_csv(zircon_input_path)
             passed_strategies_df = pd.concat([existing_zircon, passed_strategies_df]).drop_duplicates(subset=['strategy_id'])
         passed_strategies_df.to_csv(zircon_input_path, index=False)
-        print(f"\n✅ Found {len(passed_strategies_df)} total master strategies. Saved to Zircon input.")
+        print(f"\n✅ Saved/Updated {len(passed_strategies_df)} master strategies to Zircon input.")
         
         results_df.to_csv(detailed_report_path, index=False)
         print(f"✅ Full detailed report cleaned and saved.")

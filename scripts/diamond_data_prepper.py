@@ -31,6 +31,7 @@ import ta
 import talib
 import numba
 from sklearn.preprocessing import StandardScaler
+import sys # <-- IMPORT SYS MODULE
 
 # --- CONFIGURATION & COPIED FUNCTIONS ---
 # These configurations and helper functions are identical to those in the
@@ -198,6 +199,17 @@ def create_gold_features(features_df, scaler=None):
         return df, scaler
 
 if __name__ == "__main__":
+    """
+    Main execution block.
+    
+    This script can be run in two modes:
+    1. Discovery Mode (no arguments): Scans for all raw files and prepares data for any that are missing.
+       Example: `python scripts/diamond_data_prepper.py`
+       
+    2. Targeted Mode (one argument): Identifies the timeframe from the target file and prepares
+       data for ALL raw files that share that same timeframe.
+       Example: `python scripts/diamond_data_prepper.py XAUUSD15.csv`
+    """
     # --- Define Project Directory Structure ---
     core_dir = os.path.dirname(os.path.abspath(__file__))
     raw_dir = os.path.abspath(os.path.join(core_dir, '..', 'raw_data'))
@@ -206,27 +218,47 @@ if __name__ == "__main__":
     
     # --- Discover Raw Data Files ---
     try:
-        raw_files = [f for f in os.listdir(raw_dir) if f.endswith('.csv')]
+        all_raw_files = [f for f in os.listdir(raw_dir) if f.endswith('.csv')]
     except FileNotFoundError:
-        print(f"❌ Raw data directory not found. Exiting.")
-        exit()
+        print(f"❌ Raw data directory not found. Exiting."); sys.exit(1)
     
-    if not raw_files:
-        print("❌ No raw data files found to process. Exiting.")
-        exit()
+    if not all_raw_files:
+        print("❌ No raw data files found to process. Exiting."); sys.exit(1)
+
+    # --- NEW: DUAL-MODE FILE DISCOVERY LOGIC ---
+    target_file_arg = sys.argv[1] if len(sys.argv) > 1 else None
+    files_to_consider = []
+
+    if target_file_arg:
+        # --- Targeted Mode ---
+        print(f"🎯 Targeted Mode: Preparing data for timeframe of '{target_file_arg}'")
+        match = re.search(r'(\d+)\.csv$', target_file_arg)
+        if not match:
+            print(f"❌ Error: Could not extract timeframe from '{target_file_arg}'. Exiting.")
+            sys.exit(1)
+        
+        target_timeframe_num = match.group(1)
+        # Find all raw files that share this timeframe
+        files_to_consider = [f for f in all_raw_files if f.endswith(f"{target_timeframe_num}.csv")]
+        print(f"Found {len(files_to_consider)} files matching the '{target_timeframe_num}m' timeframe.")
+    else:
+        # --- Discovery Mode (Default) ---
+        print("🔍 Discovery Mode: Scanning for all new raw files to prepare...")
+        files_to_consider = all_raw_files
 
     # --- Identify Markets That Need Processing ---
     # This makes the script resumable by only processing new or missing files.
     markets_to_process = []
-    for f in raw_files:
+    for f in files_to_consider:
         market_name = f.replace('.csv', '')
-        output_silver_path = os.path.join(prepared_data_dir, f"{market_name}_silver.parquet")
-        if not os.path.exists(output_silver_path):
+        # Check if the FINAL output already exists. This makes the script resumable.
+        output_gold_path = os.path.join(prepared_data_dir, f"{market_name}_gold.parquet")
+        if not os.path.exists(output_gold_path):
             markets_to_process.append(f)
     
     if not markets_to_process:
-        print("✅ All raw data is already prepared. Nothing to do.")
-        exit()
+        print("✅ All necessary market data is already prepared. Nothing to do.")
+        sys.exit(0)
 
     print(f"Found {len(markets_to_process)} new market(s) to prepare.")
     
@@ -247,16 +279,21 @@ if __name__ == "__main__":
         output_gold_path = os.path.join(prepared_data_dir, f"{market_name}_gold.parquet")
             
         print(f"\nProcessing {market}...")
-        # 1. Load raw data.
-        raw_df = robust_read_csv(os.path.join(raw_dir, market))
-        # 2. Generate Silver features.
-        silver_df = add_all_market_features(raw_df.copy()).iloc[INDICATOR_WARMUP_PERIOD:].reset_index(drop=True)
-        # 3. Generate Gold features using the pre-fitted scaler.
-        gold_df, _ = create_gold_features(silver_df.copy(), scaler=scaler)
-        
-        # 4. Save the final data to efficient Parquet files.
-        silver_df.to_parquet(output_silver_path)
-        gold_df.to_parquet(output_gold_path)
-        print(f"✅ Prepared data for {market} saved.")
-        
+        try:
+            # 1. Load raw data.
+            raw_df = robust_read_csv(os.path.join(raw_dir, market))
+            # 2. Generate Silver features.
+            silver_df = add_all_market_features(raw_df.copy()).iloc[INDICATOR_WARMUP_PERIOD:].reset_index(drop=True)
+            # 3. Generate Gold features using the pre-fitted scaler.
+            gold_df, _ = create_gold_features(silver_df.copy(), scaler=scaler)
+            
+            # 4. Save the final data to efficient Parquet files.
+            silver_df.to_parquet(output_silver_path)
+            gold_df.to_parquet(output_gold_path)
+            print(f"✅ Prepared data for {market} saved.")
+        except Exception as e:
+            print(f"❌ FAILED to process {market}. Error: {e}")
+            # In a full pipeline, we might want to stop here.
+            # For robustness, we'll just print the error and continue.
+            
     print("\n" + "="*50 + "\n✅ All market data preparation complete.")

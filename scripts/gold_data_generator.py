@@ -28,6 +28,7 @@ import re
 from tqdm import tqdm
 import gc
 from multiprocessing import Pool, cpu_count
+import sys # <-- IMPORT SYS MODULE
 
 # --- CONFIGURATION ---
 
@@ -164,62 +165,79 @@ def process_file_in_parallel(file_path_tuple):
         return f"❌ FAILED to process {fname}. Error: {e}"
 
 if __name__ == "__main__":
+    """
+    Main execution block.
+    
+    This script can be run in two modes:
+    1. Discovery Mode (no arguments): Scans for all new silver files and processes them.
+       Example: `python scripts/gold_data_generator.py`
+       
+    2. Targeted Mode (one argument): Processes only the single file specified.
+       Example: `python scripts/gold_data_generator.py XAUUSD15.csv`
+    """
     # --- Define Project Directory Structure ---
     core_dir = os.path.dirname(os.path.abspath(__file__))
     silver_features_dir = os.path.abspath(os.path.join(core_dir, '..', 'silver_data', 'features'))
     gold_features_dir = os.path.abspath(os.path.join(core_dir, '..', 'gold_data', 'features'))
     os.makedirs(gold_features_dir, exist_ok=True)
 
-    # --- Discover Files to Process ---
-    try:
-        all_files = [f for f in os.listdir(silver_features_dir) if f.endswith('.csv')]
-    except FileNotFoundError:
-        print(f"❌ Error: Directory not found: '{silver_features_dir}'.")
-        all_files = []
+    # --- NEW: DUAL-MODE FILE DISCOVERY LOGIC ---
+    target_file_arg = sys.argv[1] if len(sys.argv) > 1 else None
 
-    if not all_files:
-        print("❌ No silver feature files found to process.")
-    else:
-        # Check which files already have a corresponding Gold output to make the script resumable.
-        files_to_process = [f for f in all_files if not os.path.exists(os.path.join(gold_features_dir, f))]
-        
-        if not files_to_process:
-            print("✅ All gold feature files already exist. Nothing to do.")
+    if target_file_arg:
+        # --- Targeted Mode ---
+        print(f"🎯 Targeted Mode: Processing single file '{target_file_arg}'")
+        silver_path_check = os.path.join(silver_features_dir, target_file_arg)
+        if not os.path.exists(silver_path_check):
+            print(f"❌ Error: Target file not found in silver_data/features directory: {target_file_arg}")
+            files_to_process = []
         else:
-            print(f"Found {len(files_to_process)} new silver feature file(s) to process.")
-            
-            # --- Configure Multiprocessing ---
-            use_multiprocessing = input("Use multiprocessing? (y/n): ").strip().lower() == 'y'
-            if use_multiprocessing:
-                num_processes = MAX_CPU_USAGE
-            else:
-                # If not using the max, prompt for a specific number of cores.
-                try:
-                    num_processes = int(input(f"Enter number of processes to use (1-{cpu_count()}): ").strip())
-                    if num_processes < 1 or num_processes > cpu_count(): raise ValueError
-                except ValueError:
-                    print("Invalid input. Defaulting to 1 process.")
-                    num_processes = 1
-            
-            # --- Prepare Processing Tasks ---
-            tasks = [(os.path.join(silver_features_dir, fname), os.path.join(gold_features_dir, fname)) for fname in files_to_process]
-            
-            # --- Execute Processing ---
-            effective_num_processes = min(num_processes, len(tasks))
-            print(f"\n🚀 Starting parallel processing with {effective_num_processes} workers...")
-            
-            if effective_num_processes > 1:
-                # Use a multiprocessing Pool to execute tasks in parallel.
-                with Pool(processes=effective_num_processes) as pool:
-                    # `imap_unordered` is memory-efficient and `tqdm` provides a progress bar.
-                    results = list(tqdm(pool.imap_unordered(process_file_in_parallel, tasks), total=len(tasks)))
-            else:
-                # Execute tasks sequentially in the main process if only one worker is specified.
-                results = [process_file_in_parallel(task) for task in tqdm(tasks)]
+            files_to_process = [target_file_arg]
+    else:
+        # --- Discovery Mode (Default) ---
+        print("🔍 Discovery Mode: Scanning for all new files...")
+        try:
+            # Find all available silver files
+            all_files = [f for f in os.listdir(silver_features_dir) if f.endswith('.csv')]
+            # Check which files already have a corresponding Gold output to make the script resumable.
+            files_to_process = [f for f in all_files if not os.path.exists(os.path.join(gold_features_dir, f))]
+        except FileNotFoundError:
+            print(f"❌ Error: Directory not found: '{silver_features_dir}'.")
+            files_to_process = []
 
-            # --- Display Summary ---
-            print("\n--- Processing Summary ---")
-            for res in results:
-                print(res)
+    if not files_to_process:
+        print("ℹ️ No new files to process.")
+    else:
+        print(f"Found {len(files_to_process)} new silver feature file(s) to process.")
+        
+        # --- Configure Multiprocessing ---
+        # If in targeted mode or only one file, don't ask, just use multiprocessing logic.
+        if target_file_arg or len(files_to_process) == 1:
+            use_multiprocessing = True
+        else:
+            use_multiprocessing = input("Use multiprocessing? (y/n): ").strip().lower() == 'y'
+        
+        if use_multiprocessing:
+            num_processes = MAX_CPU_USAGE
+        else:
+            num_processes = 1
+        
+        # --- Prepare Processing Tasks ---
+        tasks = [(os.path.join(silver_features_dir, fname), os.path.join(gold_features_dir, fname)) for fname in files_to_process]
+        
+        # --- Execute Processing ---
+        effective_num_processes = min(num_processes, len(tasks))
+        print(f"\n🚀 Starting processing with {effective_num_processes} worker(s)...")
+        
+        if effective_num_processes > 1:
+            with Pool(processes=effective_num_processes) as pool:
+                results = list(tqdm(pool.imap_unordered(process_file_in_parallel, tasks), total=len(tasks), desc="Processing Files"))
+        else:
+            results = [process_file_in_parallel(task) for task in tqdm(tasks, desc="Processing Files")]
+
+        # --- Display Summary ---
+        print("\n--- Processing Summary ---")
+        for res in results:
+            print(res)
 
     print("\n" + "="*50 + "\n✅ All gold data generation complete.")
