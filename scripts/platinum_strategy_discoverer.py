@@ -62,18 +62,21 @@ MAX_CPU_USAGE = max(1, cpu_count() - 2)
 
 def get_rules_from_tree(tree, feature_names):
     """
-    Extracts all valid rule paths from a trained Decision Tree.
+    Extracts human-readable rule paths from a trained scikit-learn Decision Tree.
 
-    This function recursively walks through the tree's nodes and constructs a
-    human-readable rule string for each path from the root to a leaf node that
-    meets the `MIN_CANDLES_PER_RULE` requirement.
+    This function recursively traverses the nodes of a fitted Decision Tree.
+    For each path from the root to a leaf node that represents a sufficient
+    number of samples (as defined by `MIN_CANDLES_PER_RULE`), it constructs a
+    string representing the sequence of decisions (e.g., "RSI <= 35 and ADX > 25").
 
     Args:
-        tree (DecisionTreeClassifier): The trained scikit-learn tree model.
-        feature_names (list): A list of the feature names used to train the tree.
+        tree (DecisionTreeRegressor): The trained scikit-learn tree model object.
+        feature_names (list): A list of the feature names (X.columns) that the
+                              tree was trained on, in the correct order.
 
     Returns:
-        list: A list of dictionaries, where each dictionary represents a valid rule.
+        list: A list of dictionaries, where each dictionary contains the 'rule'
+              string and the 'num_candles' (samples) that the rule applies to.
     """
     tree_ = tree.tree_
     feature_name = [feature_names[i] if i != _tree.TREE_UNDEFINED else "!" for i in tree_.feature]
@@ -95,19 +98,24 @@ def get_rules_from_tree(tree, feature_names):
 
 def process_definition_batch(definition, gold_features_df, targets_dir):
     """
-    The core worker function for multiprocessing. It processes a single
-    strategy blueprint, runs the ML analysis, applies the "lift" filter,
-    and returns any statistically significant rules found.
+    Performs the complete ML analysis for a single strategy blueprint.
+
+    This is the core worker function executed in parallel. For a given strategy
+    blueprint, it loads the pre-computed target data, merges it with the market
+    features, trains a Decision Tree Regressor, extracts the rules, and applies
+    a statistical "lift" filter to identify only the most promising rules.
 
     Args:
         definition (dict): A dictionary representing one strategy blueprint,
                            which MUST include the 'key'.
-        gold_features_df (pd.DataFrame): The full ML-ready features dataset.
-        targets_dir (str): The directory containing the pre-computed target files.
+        gold_features_df (pd.DataFrame): The full, ML-ready market features dataset (X).
+        targets_dir (str): The directory containing the pre-computed target files
+                           (y), which are named by their corresponding key.
 
     Returns:
         list: A list of dictionaries, where each dictionary is a complete,
-              discovered strategy ready to be saved.
+              statistically significant discovered strategy. Returns an empty
+              list if no significant rules are found.
     """
     target_file = os.path.join(targets_dir, f"{definition['key']}.csv")
     

@@ -50,6 +50,14 @@ TRADE_LOGS_DIR = os.path.join(CORE_DIR, 'zircon_data', 'trade_logs')
 def get_available_reports():
     """
     Scans the Zircon results directory to find all available summary reports.
+
+    This function uses a regular expression to identify files that match the
+    `summary_report_*.csv` pattern, extracting the market name from the filename.
+    The results are cached to avoid repeated disk I/O on every interaction.
+
+    Returns:
+        list: A sorted list of report names (e.g., ['XAUUSD15', 'EURUSD60'])
+              available for analysis.
     """
     if not os.path.exists(ZIRCON_RESULTS_DIR): return []
     pattern = re.compile(r"summary_report_(.+)\.csv")
@@ -59,9 +67,24 @@ def get_available_reports():
 @st.cache_data(ttl=600)
 def load_and_merge_data(report_name):
     """
-    Loads and merges the Zircon Summary, Zircon Detailed, and Diamond Mastery
-    reports. It robustly cleans the data, capping infinite values for stable
-    visualization and analysis.
+    Loads and merges all relevant data sources for a selected report.
+
+    This is the primary data loading function for the dashboard. It fetches the
+    Zircon summary report (cross-market performance), the Zircon detailed report
+    (per-market performance), and the Diamond mastery report (origin-market
+    performance). It then merges them into a single comprehensive DataFrame.
+    Crucially, it cleans the data by capping extreme values for Profit Factor and
+    Sharpe Ratio to ensure visualizations are stable and readable.
+
+    Args:
+        report_name (str): The name of the report to load, corresponding to a
+                           specific instrument and timeframe (e.g., 'XAUUSD15').
+
+    Returns:
+        tuple: A tuple of three DataFrames:
+               - master_view_df: The main merged and cleaned DataFrame for the dashboard.
+               - zircon_detailed_df: The raw detailed report from the Zircon layer.
+               - mastery_df: The raw report from the Diamond layer.
     """
     if not report_name: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     
@@ -94,8 +117,18 @@ def load_and_merge_data(report_name):
 
 def write_to_blacklist(strategy_key, report_name):
     """
-    Appends a strategy's unique 'key' to the blacklist file, preventing its
-    parent blueprint from being discovered in future Platinum runs.
+    Appends a strategy's parent blueprint key to the corresponding blacklist file.
+
+    This function provides the feedback mechanism from the dashboard back to the
+    discovery pipeline. It takes a strategy's unique 'key', loads the existing
+    blacklist for that instrument, adds the new key, removes duplicates, and
+    saves the file. This prevents the flawed parent blueprint from being analyzed
+    in future runs of the Platinum layer.
+
+    Args:
+        strategy_key (str): The unique hash key of the strategy's parent blueprint.
+        report_name (str): The name of the origin market report (e.g., 'XAUUSD15'),
+                           used to identify the correct blacklist file.
     """
     blacklist_path = os.path.join(BLACKLIST_DIR, f"{report_name}.csv")
     key_to_add = pd.DataFrame([{'key': strategy_key}])
@@ -111,8 +144,19 @@ def write_to_blacklist(strategy_key, report_name):
 @st.cache_data(ttl=3600)
 def load_market_internals(markets):
     """
-    Loads Silver data to calculate high-level market characteristics like
-    trendiness and volatility.
+    Loads prepared Silver data to calculate high-level market characteristics.
+
+    For each market provided, this function reads the pre-calculated Silver
+    data and computes metrics like the percentage of time spent in a trend,
+    the percentage of time in high volatility, and the overall price change.
+    This provides crucial context to determine if a strategy's success was
+    simply due to a strong market tailwind.
+
+    Args:
+        markets (list): A list of market names (e.g., ['EURUSD15.csv', 'GBPUSD15.csv']).
+
+    Returns:
+        pd.DataFrame: A DataFrame summarizing the internal characteristics of each market.
     """
     internals = []
     for market_name in markets:
@@ -130,18 +174,57 @@ def load_market_internals(markets):
 
 @st.cache_data(ttl=3600)
 def load_full_silver_data(market_name):
-    """Loads time and close price from a market's Silver data."""
+    """
+    Loads the time and close price from a market's prepared Silver data.
+
+    This is a lightweight helper function designed to quickly fetch the necessary
+    data for plotting a market's price history. The data is cached for performance.
+
+    Args:
+        market_name (str): The name of the market to load (e.g., 'XAUUSD15.csv').
+
+    Returns:
+        pd.DataFrame or None: A DataFrame with 'time' and 'close' columns, or None
+                              if the data file cannot be found.
+    """
     silver_path = os.path.join(PREPARED_DATA_DIR, f"{market_name.replace('.csv','')}_silver.parquet")
     return pd.read_parquet(silver_path, columns=['time', 'close']) if os.path.exists(silver_path) else None
 
 @st.cache_data(ttl=600)
 def load_trade_log(strategy_id, market_name):
-    """Loads the detailed trade log for a strategy on a market."""
+    """
+    Loads the detailed, trade-by-trade log for a specific strategy on a specific market.
+
+    This function locates and reads the CSV file containing every individual trade
+    executed during a strategy's backtest on a given market. This granular data
+    powers the most detailed visualizations, such as plotting trade entries on
+    the price chart.
+
+    Args:
+        strategy_id (str): The unique identifier of the strategy.
+        market_name (str): The market on which the strategy was tested (e.g., 'XAUUSD15.csv').
+
+    Returns:
+        pd.DataFrame or None: A DataFrame containing the detailed trade log, or None
+                              if the log file does not exist.
+    """
     log_path = os.path.join(TRADE_LOGS_DIR, strategy_id, f"{market_name.replace('.csv','')}.csv")
     return pd.read_csv(log_path, parse_dates=['entry_time']) if os.path.exists(log_path) else None
 
 def parse_dict_col(data_string):
-    """Safely parses a string representation of a dictionary."""
+    """
+    Safely parses a string representation of a dictionary into a Python dictionary.
+
+    This utility function uses `ast.literal_eval` to securely convert a string
+    (e.g., "{'London': 75.0, 'Asian': 25.0}") into a dictionary object. It includes
+    error handling to return an empty dictionary if parsing fails, preventing crashes.
+
+    Args:
+        data_string (str): The string to be parsed.
+
+    Returns:
+        dict: The parsed dictionary, or an empty dictionary if parsing fails.
+    """
     try: return ast.literal_eval(str(data_string))
     except: return {}
 

@@ -43,16 +43,22 @@ MAX_CPU_USAGE = max(1, cpu_count() - 2)
 
 def filter_chunk_for_definition(chunk, definition):
     """
-    Filters a DataFrame chunk to find all trades that match a specific
-    strategy blueprint (definition). This function is generic and supports
-    static, semi-dynamic, and fully-dynamic strategy types.
+    Filters a data chunk to isolate trades matching a single strategy blueprint.
+
+    This function acts as a dynamic filter, applying a series of conditions
+    to a DataFrame based on the provided strategy definition. It correctly
+    handles both "dynamic" rules (where SL/TP are defined by a binned distance
+    to a market level) and "static" rules (where SL/TP are fixed percentage ratios).
+    The use of `np.isclose` ensures safe comparison of floating-point numbers.
 
     Args:
-        chunk (pd.DataFrame): A chunk of enriched trade data.
-        definition (pd.Series): A single row representing one strategy blueprint.
+        chunk (pd.DataFrame): A chunk of enriched trade data from the Silver layer.
+        definition (pd.Series): A single row from the combinations DataFrame,
+                                representing one unique strategy blueprint.
 
     Returns:
-        pd.DataFrame: A filtered DataFrame containing only matching trades.
+        pd.DataFrame: A new DataFrame containing only the rows from the original
+                      chunk that perfectly match the strategy definition.
     """
     # Start with the full chunk and progressively filter it down.
     temp_df = chunk
@@ -86,19 +92,27 @@ def filter_chunk_for_definition(chunk, definition):
 
 def process_chunk_for_all_definitions(chunk_path, all_definitions, target_dir, dtype_map):
     """
-    A worker function for multiprocessing. It processes a single data chunk,
-    finds matching trades for ALL strategy definitions, aggregates them, and
-    appends the results to the appropriate target files.
+    Processes one data chunk against all strategy definitions for parallel execution.
+
+    This is the core worker function for the multiprocessing pool. It loads a
+    single data chunk, then iterates through every strategy blueprint defined in
+    the `all_definitions` DataFrame. For each blueprint, it filters the chunk
+    to find matching trades, aggregates them to count trades per timestamp, and
+    appends these counts to the correct target file on disk. This "map-reduce"
+    style approach avoids reading the source chunks multiple times.
 
     Args:
-        chunk_path (str): Path to the single chunk CSV file to process.
-        all_definitions (pd.DataFrame): The master list of all strategy blueprints,
-                                        which MUST include the 'key' column.
-        target_dir (str): The output directory for the target files.
-        dtype_map (dict): A mapping of column names to dtypes for efficient loading.
+        chunk_path (str): The full path to the single chunk CSV file to be processed.
+        all_definitions (pd.DataFrame): The master DataFrame of all strategy
+                                        blueprints, which MUST include the 'key' column.
+        target_dir (str): The path to the output directory where target files
+                          (named by key) will be saved.
+        dtype_map (dict): A mapping of column names to data types, used for
+                          loading the chunk CSV efficiently.
 
     Returns:
-        str: The path of the chunk that was processed.
+        str: The path of the chunk that was successfully processed, used for
+             progress tracking.
     """
     # Load the data chunk with optimized data types to save memory.
     chunk_df = pd.read_csv(chunk_path, parse_dates=['entry_time'], dtype=dtype_map)

@@ -50,8 +50,18 @@ INDICATOR_WARMUP_PERIOD = 200
 
 def downcast_dtypes(df):
     """
-    Reduces the memory footprint of a DataFrame by downcasting numeric types
-    to more efficient formats (e.g., float64 to float32).
+    Optimizes a DataFrame's memory usage by converting numeric columns to smaller dtypes.
+
+    It iterates through all float64 and int64 columns and casts them to
+    float32 and int32, respectively. This can significantly reduce the memory
+    footprint of large DataFrames without a meaningful loss of precision for
+    most financial data.
+
+    Args:
+        df (pd.DataFrame): The input DataFrame to optimize.
+
+    Returns:
+        pd.DataFrame: The DataFrame with downcasted numeric data types.
     """
     for col in df.select_dtypes(include=['float64']).columns:
         df[col] = df[col].astype('float32')
@@ -61,8 +71,20 @@ def downcast_dtypes(df):
 
 def robust_read_csv(filepath):
     """
-    Reads a raw OHLC CSV file reliably, handling potential delimiter issues
-    and varying column counts. Ensures data is clean and sorted by time.
+    Reads raw OHLC CSV data reliably, handling common formatting inconsistencies.
+
+    This function is designed to be resilient to different CSV delimiters by using
+    the 'python' engine with 'sep=None'. It automatically assigns standard column
+    names, adds a dummy volume column if one is not present, converts columns
+    to their proper numeric and datetime formats, and drops any rows with
+    missing essential data.
+
+    Args:
+        filepath (str): The full path to the raw input CSV file.
+
+    Returns:
+        pd.DataFrame: A clean, sorted DataFrame with standardized column names
+                      ('time', 'open', 'high', 'low', 'close', 'volume').
     """
     df = pd.read_csv(filepath, sep=None, engine="python", header=None)
     if df.shape[1] > 5:
@@ -81,9 +103,23 @@ def robust_read_csv(filepath):
 @numba.njit
 def _calculate_s_r_numba(lows, highs, window):
     """
-    A high-performance Numba function to identify fractal-based support and
-    resistance points. A point is support if it's the lowest low in its
-    surrounding window, and resistance if it's the highest high.
+    Identifies fractal support and resistance points using a high-speed Numba kernel.
+
+    This function iterates through price data and identifies local minima and maxima
+    within a specified rolling window. A low is marked as a support point if it is
+    the lowest value in the surrounding window. A high is marked as a resistance
+    point if it is the highest value. This "fractal" approach is a common way to
+    identify significant price levels.
+
+    Args:
+        lows (np.array): A NumPy array of low prices.
+        highs (np.array): A NumPy array of high prices.
+        window (int): The number of candles to look forward and backward to define the local window.
+
+    Returns:
+        tuple: A tuple containing two NumPy arrays:
+               - support_points: An array with prices at support fractals, and NaN elsewhere.
+               - resistance_points: An array with prices at resistance fractals, and NaN elsewhere.
     """
     n = len(lows)
     support_points, resistance_points = np.full(n, np.nan, dtype=np.float32), np.full(n, np.nan, dtype=np.float32)
@@ -98,7 +134,20 @@ def _calculate_s_r_numba(lows, highs, window):
 
 def add_support_resistance(df, window=PIVOT_WINDOW):
     """
-    Wrapper function to calculate and forward-fill support/resistance levels.
+    Calculates and adds forward-filled support and resistance levels to the DataFrame.
+
+    This function acts as a wrapper for the core Numba S/R calculation. It extracts
+    the necessary NumPy arrays from the DataFrame, calls the high-speed
+    _calculate_s_r_numba function, and then forward-fills the resulting sparse
+    support and resistance points. Forward-filling ensures that every candle has a
+    value for the "last known" support and resistance level.
+
+    Args:
+        df (pd.DataFrame): The input market data DataFrame.
+        window (int): The window size for the fractal calculation.
+
+    Returns:
+        pd.DataFrame: The original DataFrame with two new columns: 'support' and 'resistance'.
     """
     lows, highs = df["low"].values.astype(np.float32), df["high"].values.astype(np.float32)
     support_points, resistance_points = _calculate_s_r_numba(lows, highs, window)
@@ -109,8 +158,21 @@ def add_support_resistance(df, window=PIVOT_WINDOW):
 
 def add_all_market_features(df):
     """
-    Calculates a comprehensive suite of market features for each candle
-    in the input DataFrame, organized into efficient batches.
+    Generates a comprehensive suite of market features for the input OHLC data.
+
+    This function is the primary feature engineering engine for market context. It
+    calculates and appends a wide array of features in organized batches:
+    1.  Standard technical indicators (SMAs, EMAs, Bollinger Bands, RSI, MACD, etc.).
+    2.  All 60+ classic candlestick patterns recognized by the TA-Lib library.
+    3.  Fractal-based support and resistance levels.
+    4.  Time-based features (session, hour, weekday) and price-action characteristics
+        (e.g., bullish ratio, average body size over lookback periods).
+
+    Args:
+        df (pd.DataFrame): The raw OHLC DataFrame with a 'time' column.
+
+    Returns:
+        pd.DataFrame: The original DataFrame enriched with over 200 new feature columns.
     """
     new_features_list = []
     
@@ -171,17 +233,26 @@ def add_all_market_features(df):
 
 def create_feature_lookup(features_df, level_cols):
     """
-    Converts the features DataFrame into a highly efficient lookup structure.
-    
-    This is a pre-computation step that builds two key components:
-    1.  A NumPy array (`feature_values_np`) holding just the numeric feature
-        data for maximum speed.
-    2.  A pandas Series (`time_to_idx_lookup`) that maps a timestamp to its
-        integer row position in the NumPy array.
-    3.  A dictionary (`col_to_idx`) to map a feature name to its column
-        position in the NumPy array.
-        
-    This structure allows for near-instantaneous, memory-efficient lookups.
+    Pre-computes and organizes feature data into highly efficient lookup structures.
+
+    This is a critical optimization step that transforms the features DataFrame
+    into a set of structures designed for near-instantaneous data retrieval.
+    This avoids the need for slow, memory-intensive DataFrame merges later on.
+
+    Args:
+        features_df (pd.DataFrame): The DataFrame containing all market features,
+                                    sorted by time.
+        level_cols (list): A list of the column names that are needed for the
+                           lookup calculations.
+
+    Returns:
+        tuple: A tuple containing three essential lookup components:
+               - feature_values_np (np.array): A 2D NumPy array of the raw numeric
+                 feature values for maximum computational speed.
+               - time_to_idx_lookup (pd.Series): A mapping from a timestamp to its
+                 integer row index in the NumPy array.
+               - col_to_idx (dict): A mapping from a feature's column name to its
+                 integer column index in the NumPy array.
     """
     # Ensure features_df is sorted by time, which is required for the lookup logic
     features_df = features_df.sort_values('time').reset_index(drop=True)
@@ -199,16 +270,22 @@ def create_feature_lookup(features_df, level_cols):
 
 def add_positioning_features_lookup(bronze_chunk, feature_values_np, time_to_idx_lookup, col_to_idx):
     """
-    Calculates relational positioning features using the pre-computed lookup structures.
+    Enriches a chunk of Bronze data with relational features using the fast lookup structures.
 
-    This function performs a series of highly optimized, vectorized operations:
-    1.  It uses the `time_to_idx_lookup` to find the correct row index for every
-        trade in the `bronze_chunk` in a single operation. This avoids slow loops
-        or memory-intensive merges.
-    2.  It uses these indices to pull the relevant market data directly from the
-        `feature_values_np` NumPy array.
-    3.  All subsequent calculations are performed on these NumPy arrays, which is
-        the fastest method for numerical computation in Python.
+    This function takes a set of simulated trades and adds features that describe
+    the placement of their SL and TP levels relative to various market structure
+    levels (e.g., SMAs, Bollinger Bands, S/R). It performs these calculations using
+    highly optimized, vectorized NumPy operations, leveraging the pre-computed
+    lookup structures for extreme efficiency.
+
+    Args:
+        bronze_chunk (pd.DataFrame): A chunk of data from the Bronze trades file.
+        feature_values_np (np.array): The NumPy array of market feature values.
+        time_to_idx_lookup (pd.Series): The timestamp-to-row-index lookup Series.
+        col_to_idx (dict): The column-name-to-column-index lookup dictionary.
+
+    Returns:
+        pd.DataFrame: The enriched DataFrame chunk with new relational positioning features.
     """
     # Find the row indices in the features array for each trade's entry time.
     # `reindex` with `method='ffill'` is a powerful way to perform a fast,
@@ -261,7 +338,23 @@ def add_positioning_features_lookup(bronze_chunk, feature_values_np, time_to_idx
 
 def create_silver_data(bronze_path, raw_path, features_path, chunked_outcomes_dir):
     """
-    Orchestrates the entire Silver Layer process for a single instrument.
+    Orchestrates the entire Silver Layer data generation process for a single instrument.
+
+    This function manages the two main stages of the Silver Layer:
+    1.  It first calls the feature engineering functions to generate and save a
+        comprehensive market features file based on the raw OHLC data.
+    2.  It then prepares the highly efficient lookup structures from this feature
+        file.
+    3.  Finally, it iterates through the massive Bronze trades file in memory-safe
+        chunks, enriching each chunk with relational positioning features and
+        saving the result to a dedicated instrument-specific directory.
+
+    Args:
+        bronze_path (str): Full path to the input Bronze trades CSV file.
+        raw_path (str): Full path to the corresponding raw OHLC data file.
+        features_path (str): Full path where the Silver market features file should be saved.
+        chunked_outcomes_dir (str): Path to the directory where the enriched trade
+                                    chunks should be saved.
     """
     print(f"\n{'='*25}\nProcessing: {os.path.basename(raw_path)}\n{'='*25}")
 

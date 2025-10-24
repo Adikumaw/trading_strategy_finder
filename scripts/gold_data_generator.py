@@ -39,8 +39,18 @@ MAX_CPU_USAGE = max(1, cpu_count() - 2)
 
 def downcast_dtypes(df):
     """
-    Reduces the memory footprint of a DataFrame by downcasting numeric types
-    to more efficient formats (e.g., float64 to float32).
+    Optimizes a DataFrame's memory usage by converting numeric columns to smaller dtypes.
+
+    It iterates through all float64 and int64 columns and casts them to
+    float32 and int32, respectively. This can significantly reduce the memory
+    footprint of large DataFrames without a meaningful loss of precision for
+    most financial data.
+
+    Args:
+        df (pd.DataFrame): The input DataFrame to optimize.
+
+    Returns:
+        pd.DataFrame: The DataFrame with downcasted numeric data types.
     """
     for col in df.select_dtypes(include=['float64']).columns:
         df[col] = df[col].astype('float32')
@@ -50,15 +60,24 @@ def downcast_dtypes(df):
 
 def create_gold_features(features_df):
     """
-    Performs the full suite of ML preprocessing transformations on a Silver
-    features DataFrame.
+    Transforms a Silver-layer DataFrame into a Gold-layer, ML-ready dataset.
+
+    This function orchestrates the entire machine learning preprocessing pipeline.
+    It takes the human-readable, feature-rich Silver dataset and applies a series
+    of transformations to make it suitable for ML models. These steps include
+    converting absolute price levels to a normalized distance from the close,
+    one-hot encoding categorical variables, compressing candlestick pattern
+    scores into a discrete scale, and standardizing all remaining numeric
+    features to have a mean of zero and a standard deviation of one.
 
     Args:
         features_df (pd.DataFrame): The human-readable features dataset from
-                                    the Silver layer.
+                                    the Silver layer, containing a 'time' column
+                                    and various market features.
 
     Returns:
-        pd.DataFrame: A fully transformed, ML-ready DataFrame.
+        pd.DataFrame: A fully transformed, purely numerical, and standardized
+                      DataFrame ready for machine learning tasks.
     """
     df = features_df.copy()
 
@@ -118,14 +137,21 @@ def create_gold_features(features_df):
 
 def process_file_in_parallel(file_path_tuple):
     """
-    A worker function designed to be run by a multiprocessing Pool.
-    It encapsulates the entire read -> process -> save workflow for a single file.
+    A worker function to process a single file for parallel execution.
+
+    This function acts as a self-contained wrapper for the entire workflow of
+    processing one file. It reads a Silver features CSV, passes it to the
+    `create_gold_features` function for transformation, and saves the resulting
+    ML-ready DataFrame to the specified output path. It is designed to be
+    called by a multiprocessing `Pool`.
 
     Args:
-        file_path_tuple (tuple): A tuple containing the (input_silver_path, output_gold_path).
+        file_path_tuple (tuple): A tuple containing two string elements:
+                                 (input_silver_path, output_gold_path).
 
     Returns:
-        str: A status message indicating success or failure.
+        str: A status message indicating the success or failure of the operation,
+             suitable for logging.
     """
     silver_path, gold_path = file_path_tuple
     fname = os.path.basename(silver_path)
