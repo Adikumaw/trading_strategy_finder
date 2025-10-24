@@ -1,4 +1,4 @@
-# silver_data_generator.py (Upgraded to create chunked_outcomes directly)
+# silver_data_generator.py (Optimized with NumPy lookup for memory and speed)
 
 """
 Silver Layer: The Enrichment Engine
@@ -12,11 +12,15 @@ It operates in two distinct stages for each instrument:
     calculates a massive suite of over 200 technical indicators, candlestick
     patterns, and custom market context features for every single candle. This
     creates a complete, candle-by-candle "fingerprint" of the market's state.
+    This comprehensive dataset is saved to `silver_data/features/`.
+
 2.  Trade Enrichment & Chunking: It then reads the enormous Bronze Dataset in
-    memory-safe chunks. For each winning trade, it merges the pre-calculated
-    market features and calculates a powerful set of "relational positioning"
-    features, which describe where a trade's SL/TP were relative to market
-    structures.
+    memory-safe chunks. For each potential winning trade, it calculates a
+    powerful set of "relational positioning" features, which describe where a
+    trade's SL/TP were relative to market structures. This is achieved using a
+    highly efficient NumPy-based lookup method that avoids large memory overhead
+    by not merging DataFrames. The final enriched trade data (without the base
+    market features) is saved in chunks to `silver_data/chunked_outcomes/`.
 """
 
 import os
@@ -165,57 +169,103 @@ def add_all_market_features(df):
     # Combine the original data with all new feature batches
     return pd.concat([df] + new_features_list, axis=1)
 
-def add_positioning_features(merged_chunk):
+def create_feature_lookup(features_df, level_cols):
     """
-    Calculates deep relational positioning features for each trade.
-
-    This is a critical function that transforms simple SL/TP prices into
-    intelligent features describing *how* they were placed relative to the
-    market structure at the time of entry.
-
-    It calculates two types of features for each indicator level:
-    1.  `_dist_to_{level}_bps`: The raw distance from the SL/TP to an indicator
-        level, measured in basis points (1/100th of 1%). This is useful for
-        finding strategies like "place SL 50bps behind the SMA".
-    2.  `_placement_pct_to_{level}`: Where the SL/TP was placed on a scale from
-        the entry price (0%) to the indicator level (100%). This is powerful
-        for finding strategies like "place TP 80% of the way to resistance".
+    Converts the features DataFrame into a highly efficient lookup structure.
+    
+    This is a pre-computation step that builds two key components:
+    1.  A NumPy array (`feature_values_np`) holding just the numeric feature
+        data for maximum speed.
+    2.  A pandas Series (`time_to_idx_lookup`) that maps a timestamp to its
+        integer row position in the NumPy array.
+    3.  A dictionary (`col_to_idx`) to map a feature name to its column
+        position in the NumPy array.
+        
+    This structure allows for near-instantaneous, memory-efficient lookups.
     """
-    level_cols = [
-        'open', 'high', 'low', 'support', 'resistance',
-        'BB_upper', 'BB_lower', 'ATR_level_up_1x', 'ATR_level_down_1x'
-    ]
-    level_cols.extend([col for col in merged_chunk.columns if 'SMA_' in col or 'EMA_' in col])
+    # Ensure features_df is sorted by time, which is required for the lookup logic
+    features_df = features_df.sort_values('time').reset_index(drop=True)
     
-    entry, sl, tp, close = merged_chunk['entry_price'], merged_chunk['sl_price'], merged_chunk['tp_price'], merged_chunk['close']
+    # Create the mapping from column name to its integer index for the NumPy array
+    col_to_idx = {col: i for i, col in enumerate(level_cols)}
     
-    for level_name in level_cols:
-        if level_name in merged_chunk.columns and not merged_chunk[level_name].isnull().all():
-            level_price = merged_chunk[level_name]
+    # Select only the necessary columns and convert to a NumPy array for speed
+    feature_values_np = features_df[level_cols].values
+    
+    # Create the primary time-to-index lookup (Pandas Series is very fast for this)
+    time_to_idx_lookup = pd.Series(features_df.index, index=features_df['time'])
+    
+    return feature_values_np, time_to_idx_lookup, col_to_idx
+
+def add_positioning_features_lookup(bronze_chunk, feature_values_np, time_to_idx_lookup, col_to_idx):
+    """
+    Calculates relational positioning features using the pre-computed lookup structures.
+
+    This function performs a series of highly optimized, vectorized operations:
+    1.  It uses the `time_to_idx_lookup` to find the correct row index for every
+        trade in the `bronze_chunk` in a single operation. This avoids slow loops
+        or memory-intensive merges.
+    2.  It uses these indices to pull the relevant market data directly from the
+        `feature_values_np` NumPy array.
+    3.  All subsequent calculations are performed on these NumPy arrays, which is
+        the fastest method for numerical computation in Python.
+    """
+    # Find the row indices in the features array for each trade's entry time.
+    # `reindex` with `method='ffill'` is a powerful way to perform a fast,
+    # point-in-time correct (backward-looking) lookup.
+    indices = time_to_idx_lookup.reindex(bronze_chunk['entry_time'], method='ffill').values
+    
+    # Handle trades that might occur before the first feature timestamp, which result in NaN
+    valid_mask = ~np.isnan(indices)
+    if not valid_mask.all():
+        bronze_chunk = bronze_chunk.loc[valid_mask]
+        indices = indices[valid_mask].astype(int)
+        if bronze_chunk.empty:
+            return pd.DataFrame()
+    indices = indices.astype(int)
+
+    # Directly pull all required feature rows from the main NumPy array in one go.
+    # This is extremely fast and memory-efficient.
+    features_for_chunk_np = feature_values_np[indices]
+
+    enriched_chunk = bronze_chunk.copy()
+    
+    # Extract trade and feature data into NumPy arrays for maximum speed
+    entry = enriched_chunk['entry_price'].values
+    sl = enriched_chunk['sl_price'].values
+    tp = enriched_chunk['tp_price'].values
+    close_at_entry = features_for_chunk_np[:, col_to_idx['close']]
+
+    def safe_divide(numerator, denominator):
+        with np.errstate(divide='ignore', invalid='ignore'):
+            result = np.divide(numerator, denominator)
+        result[denominator == 0] = np.nan
+        return result
+
+    for level_name, level_idx in col_to_idx.items():
+        # Get the entire column of level prices for the chunk from our NumPy array
+        level_price = features_for_chunk_np[:, level_idx]
+        
+        # --- Feature Calculation 1: Distance in Basis Points ---
+        enriched_chunk[f'sl_dist_to_{level_name}_bps'] = safe_divide((sl - level_price), close_at_entry) * 10000
+        enriched_chunk[f'tp_dist_to_{level_name}_bps'] = safe_divide((tp - level_price), close_at_entry) * 10000
+
+        # --- Feature Calculation 2: Placement as a Percentage ---
+        total_dist_to_level = level_price - entry
+        sl_dist_from_entry = sl - entry
+        tp_dist_from_entry = tp - entry
+        enriched_chunk[f'sl_placement_pct_to_{level_name}'] = safe_divide(sl_dist_from_entry, total_dist_to_level)
+        enriched_chunk[f'tp_placement_pct_to_{level_name}'] = safe_divide(tp_dist_from_entry, total_dist_to_level)
             
-            # Calculation 1: Distance in Basis Points
-            merged_chunk[f'sl_dist_to_{level_name}_bps'] = ((sl - level_price) / close) * 10000
-            merged_chunk[f'tp_dist_to_{level_name}_bps'] = ((tp - level_price) / close) * 10000
-
-            # Calculation 2: Placement as a Percentage
-            total_dist_to_level = level_price - entry
-            sl_dist_from_entry = sl - entry
-            tp_dist_from_entry = tp - entry
-
-            # Calculate the percentage, handling division by zero safely
-            merged_chunk[f'sl_placement_pct_to_{level_name}'] = (sl_dist_from_entry / total_dist_to_level).replace([np.inf, -np.inf], np.nan)
-            merged_chunk[f'tp_placement_pct_to_{level_name}'] = (tp_dist_from_entry / total_dist_to_level).replace([np.inf, -np.inf], np.nan)
-
-    return merged_chunk
+    return enriched_chunk
 
 def create_silver_data(bronze_path, raw_path, features_path, chunked_outcomes_dir):
     """
     Orchestrates the entire Silver Layer process for a single instrument.
-    It performs the two main steps: feature generation and trade enrichment.
     """
     print(f"\n{'='*25}\nProcessing: {os.path.basename(raw_path)}\n{'='*25}")
 
-    # --- STEP 1: Create and Save the Silver Features Dataset ---
+    # --- STEP 1: Create and Save the Full Silver Market Features Dataset ---
     print("STEP 1: Creating Silver Features dataset...")
     raw_df = robust_read_csv(raw_path)
     if len(raw_df) < INDICATOR_WARMUP_PERIOD + 1:
@@ -232,59 +282,52 @@ def create_silver_data(bronze_path, raw_path, features_path, chunked_outcomes_di
     features_df.to_csv(features_path, index=False)
     print(f"✅ Silver Features saved to: {features_path}")
     
-    # --- STEP 2: Create ENRICHED and CHUNKED Silver Outcomes ---
+    # --- STEP 2: Create Enriched and Chunked Trade Outcomes ---
     print("\nSTEP 2: Creating ENRICHED and CHUNKED Silver Outcomes...")
     os.makedirs(chunked_outcomes_dir, exist_ok=True)
     
     # Read the massive bronze file in chunks to manage memory usage
     bronze_iterator = pd.read_csv(bronze_path, chunksize=500_000, parse_dates=['entry_time'])
     
-    # Define which features we need to merge for positioning calculations
-    indicator_levels = ['support', 'resistance', 'BB_upper', 'BB_lower', 'ATR_level_up_1x', 'ATR_level_down_1x'] + [f"SMA_{p}" for p in SMA_PERIODS] + [f"EMA_{p}" for p in EMA_PERIODS]
-    cols_to_keep = ['time', 'open', 'high', 'low', 'close'] + indicator_levels
+    # Pre-computation: Build the highly efficient lookup structures ONCE before the main loop.
+    print("Creating feature lookup structure for fast processing...")
+    # It's better to read the saved, clean `features.csv` to ensure consistency.
+    # We only read the columns we absolutely need for the lookup.
+    all_level_cols = ['time', 'open', 'high', 'low', 'close', 'support', 'resistance',
+                      'BB_upper', 'BB_lower', 'ATR_level_up_1x', 'ATR_level_down_1x']
+    # Dynamically find SMA/EMA columns as they might vary
+    temp_df_cols = pd.read_csv(features_path, nrows=0).columns
+    all_level_cols.extend([col for col in temp_df_cols if 'SMA_' in col or 'EMA_' in col])
     
+    features_df_for_lookup = pd.read_csv(features_path, parse_dates=['time'], usecols=all_level_cols)
+    
+    # Define the columns that will be part of the NumPy array
+    level_cols_for_numpy = [c for c in all_level_cols if c != 'time']
+    
+    feature_values_np, time_to_idx_lookup, col_to_idx = create_feature_lookup(features_df_for_lookup, level_cols_for_numpy)
+    del features_df_for_lookup, temp_df_cols; gc.collect()
+    print("✅ Lookup structure created.")
+
     chunk_counter = 1
     for chunk in tqdm(bronze_iterator, desc="  Enriching Bronze Chunks"):
-        # Discard trades that occurred during the indicator warmup period
-        chunk = chunk[chunk['entry_time'] >= features_df['time'].min()]
         if chunk.empty: continue
         
-        # Use merge_asof for a point-in-time correct join. This is crucial
-        # to prevent lookahead bias by ensuring we only use features that
-        # were known at the time of the trade's entry.
-        merged_chunk = pd.merge_asof(
-            chunk.sort_values('entry_time'), 
-            features_df[cols_to_keep], 
-            left_on='entry_time', 
-            right_on='time', 
-            direction='backward'
-        )
-        
-        enriched_chunk = add_positioning_features(merged_chunk)
-        
-        # Drop the original indicator level columns after enrichment, as their
-        # information is now encoded in the new '_bps' and '_pct' features.
-        enriched_chunk.drop(columns=indicator_levels + ['time'], inplace=True, errors='ignore')
+        # Pass the bronze chunk and the lookup structures to the enrichment function
+        enriched_chunk = add_positioning_features_lookup(chunk, feature_values_np, time_to_idx_lookup, col_to_idx)
         
         if not enriched_chunk.empty:
             enriched_chunk = downcast_dtypes(enriched_chunk)
-            
-            # Save the enriched chunk directly to its own file. This avoids
-            # creating another single giant file and prepares the data for
-            # parallel processing in the Platinum layer.
             chunk_output_path = os.path.join(chunked_outcomes_dir, f"chunk_{chunk_counter}.csv")
             enriched_chunk.to_csv(chunk_output_path, index=False)
             chunk_counter += 1
             
-    del features_df; gc.collect() # Free up memory
     print(f"✅ Enriched and chunked Silver Outcomes saved to: {chunked_outcomes_dir}")
 
 if __name__ == "__main__":
-    # --- Define Project Directory Structure ---
     core_dir = os.path.dirname(os.path.abspath(__file__))
-    raw_dir, bronze_dir = [os.path.abspath(os.path.join(core_dir, '..', d)) for d in ['raw_data', 'bronze_data']]
-    features_dir = os.path.abspath(os.path.join(core_dir, '..', 'silver_data', 'features'))
-    chunked_outcomes_dir = os.path.abspath(os.path.join(core_dir, '..', 'silver_data', 'chunked_outcomes'))
+    raw_dir, bronze_dir = [os.path.abspath(os.path.join(core_dir, d)) for d in ['../raw_data', '../bronze_data']]
+    features_dir = os.path.abspath(os.path.join(core_dir, '../silver_data/features'))
+    chunked_outcomes_dir = os.path.abspath(os.path.join(core_dir, '../silver_data/chunked_outcomes'))
     
     os.makedirs(features_dir, exist_ok=True)
     os.makedirs(chunked_outcomes_dir, exist_ok=True)
