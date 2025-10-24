@@ -31,6 +31,7 @@ import talib
 import numba
 import numpy as np
 from tqdm import tqdm
+import sys # <-- IMPORT SYS MODULE
 
 # --- CONFIGURATION ---
 # Defines the periods for various technical indicators to be calculated.
@@ -417,6 +418,16 @@ def create_silver_data(bronze_path, raw_path, features_path, chunked_outcomes_di
     print(f"✅ Enriched and chunked Silver Outcomes saved to: {chunked_outcomes_dir}")
 
 if __name__ == "__main__":
+    """
+    Main execution block.
+    
+    This script can be run in two modes:
+    1. Discovery Mode (no arguments): Scans for all new bronze files and processes them.
+       Example: `python scripts/silver_data_generator.py`
+       
+    2. Targeted Mode (one argument): Processes only the single file specified.
+       Example: `python scripts/silver_data_generator.py XAUUSD15.csv`
+    """
     core_dir = os.path.dirname(os.path.abspath(__file__))
     raw_dir, bronze_dir = [os.path.abspath(os.path.join(core_dir, d)) for d in ['../raw_data', '../bronze_data']]
     features_dir = os.path.abspath(os.path.join(core_dir, '../silver_data/features'))
@@ -425,13 +436,42 @@ if __name__ == "__main__":
     os.makedirs(features_dir, exist_ok=True)
     os.makedirs(chunked_outcomes_dir, exist_ok=True)
 
-    # --- Find Bronze files to process ---
-    bronze_files = [f for f in os.listdir(bronze_dir) if f.endswith('.csv')]
-    if not bronze_files:
-        print("❌ No bronze files found to process.")
+    # --- NEW: DUAL-MODE FILE DISCOVERY LOGIC ---
+    target_file_arg = sys.argv[1] if len(sys.argv) > 1 else None
+
+    if target_file_arg:
+        # --- Targeted Mode ---
+        print(f"🎯 Targeted Mode: Processing single file '{target_file_arg}'")
+        bronze_path_check = os.path.join(bronze_dir, target_file_arg)
+        if not os.path.exists(bronze_path_check):
+            print(f"❌ Error: Target file not found in bronze_data directory: {target_file_arg}")
+            files_to_process = []
+        else:
+            files_to_process = [target_file_arg]
     else:
+        # --- Discovery Mode (Default) ---
+        print("🔍 Discovery Mode: Scanning for all new files...")
+        try:
+            # Find all available bronze files
+            bronze_files = [f for f in os.listdir(bronze_dir) if f.endswith('.csv')]
+            
+            # Check which ones already have a corresponding silver 'chunked_outcomes' directory
+            files_to_process = []
+            for f in bronze_files:
+                instrument_name = f.replace('.csv', '')
+                instrument_chunked_dir = os.path.join(chunked_outcomes_dir, instrument_name)
+                if not os.path.exists(instrument_chunked_dir):
+                    files_to_process.append(f)
+        except FileNotFoundError:
+            print(f"❌ Error: The directory '{bronze_dir}' was not found.")
+            files_to_process = []
+
+    if not files_to_process:
+        print("ℹ️ No new files to process.")
+    else:
+        print(f"Found {len(files_to_process)} file(s) to process...")
         # --- Main Loop: Iterate through each instrument ---
-        for fname in bronze_files:
+        for fname in files_to_process:
             instrument_name = fname.replace('.csv', '')
             bronze_path = os.path.join(bronze_dir, fname)
             raw_path = os.path.join(raw_dir, fname)
@@ -443,9 +483,8 @@ if __name__ == "__main__":
             if not os.path.exists(raw_path):
                 print(f"⚠️ SKIPPING {fname}: Corresponding raw file not found."); continue
             
-            # Skip if the final output directory already exists to make the script resumable
-            if os.path.exists(instrument_chunked_outcomes_dir):
-                print(f"✅ SKIPPING {fname}: Chunked outcomes directory already exists."); continue
+            if not os.path.exists(bronze_path):
+                print(f"⚠️ SKIPPING {fname}: Corresponding bronze file not found."); continue
             
             # --- Execute Processing ---
             try:

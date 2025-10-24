@@ -22,6 +22,7 @@ from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 import time
 from numba import njit
+import sys # <-- IMPORT SYS MODULE
 
 # --- GLOBAL CONFIGURATION ---
 
@@ -289,6 +290,16 @@ def process_file(task_id, input_file, output_file, config, spread_cost):
     return f"SUCCESS: {total_trades_found} trades found in {filename}."
 
 if __name__ == "__main__":
+    """
+    Main execution block.
+    
+    This script can be run in two modes:
+    1. Discovery Mode (no arguments): Scans the `raw_data` directory and processes all new files.
+       Example: `python scripts/bronze_data_generator.py`
+       
+    2. Targeted Mode (one argument): Processes only the single file specified on the command line.
+       Example: `python scripts/bronze_data_generator.py XAUUSD15.csv`
+    """
     start_time = time.time()
     
     # --- Define Project Directory Structure ---
@@ -305,22 +316,40 @@ if __name__ == "__main__":
     find_winning_trades_numba(np.random.rand(10), np.random.rand(10), np.random.rand(10), np.random.randint(0, 10, 10, dtype=np.int64), np.random.rand(2), np.random.rand(2), 1, 0.0001, 10)
     print("✅ Numba is ready.")
 
-    # --- Discover Files to Process ---
-    try:
-        raw_files = [f for f in os.listdir(raw_data_dir) if f.endswith('.csv')]
-    except FileNotFoundError:
-        print(f"❌ Error: The directory '{raw_data_dir}' was not found.")
-        raw_files = []
+    # --- NEW: DUAL-MODE FILE DISCOVERY LOGIC ---
+    target_file_arg = sys.argv[1] if len(sys.argv) > 1 else None
+    
+    if target_file_arg:
+        # --- Targeted Mode ---
+        print(f"🎯 Targeted Mode: Processing single file '{target_file_arg}'")
+        if not os.path.exists(os.path.join(raw_data_dir, target_file_arg)):
+            print(f"❌ Error: Target file not found in raw_data directory: {target_file_arg}")
+            raw_files = []
+        else:
+            raw_files = [target_file_arg]
+    else:
+        # --- Discovery Mode (Default) ---
+        print("🔍 Discovery Mode: Scanning for all new files...")
+        try:
+            all_raw_files = [f for f in os.listdir(raw_data_dir) if f.endswith('.csv')]
+            # Filter out files that have already been processed
+            raw_files = [f for f in all_raw_files if not os.path.exists(os.path.join(bronze_data_dir, f))]
+        except FileNotFoundError:
+            print(f"❌ Error: The directory '{raw_data_dir}' was not found.")
+            raw_files = []
 
     if not raw_files: 
-        print("❌ No CSV files found in 'raw_data'.")
+        print("ℹ️ No new files to process.")
     else:
-        # Filter out files that have already been processed
-        raw_files = [f for f in raw_files if not os.path.exists(os.path.join(bronze_data_dir, f))]
-        print(f"Found {len(raw_files)} new files to process...")
+        print(f"Found {len(raw_files)} file(s) to process...")
         
         # --- Configure Multiprocessing ---
-        use_multiprocessing = input("Use multiprocessing? (y/n): ").strip().lower() == 'y'
+        # If in targeted mode, don't ask, just use multiprocessing.
+        if target_file_arg:
+            use_multiprocessing = True
+        else:
+            use_multiprocessing = input("Use multiprocessing? (y/n): ").strip().lower() == 'y'
+            
         num_processes = MAX_CPU_USAGE if use_multiprocessing else 1
         
         # --- Prepare Processing Tasks ---

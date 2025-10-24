@@ -35,6 +35,7 @@ from tqdm import tqdm
 import gc
 from multiprocessing import Pool, cpu_count
 from functools import partial
+import sys # <-- IMPORT SYS MODULE
 
 # --- CONFIGURATION ---
 
@@ -171,43 +172,76 @@ def process_definition_batch(definition, gold_features_df, targets_dir):
     return rules_found
 
 if __name__ == "__main__":
+    """
+    Main execution block.
+    
+    This script can be run in two modes:
+    1. Discovery Mode (no arguments): Scans for all new combination files and processes them.
+       Example: `python scripts/platinum_strategy_discoverer.py`
+       
+    2. Targeted Mode (one argument): Processes only the single file specified.
+       Example: `python scripts/platinum_strategy_discoverer.py XAUUSD15.csv`
+    """
     # --- Setup Project Directories ---
     core_dir = os.path.dirname(os.path.abspath(__file__))
     gold_features_dir, combinations_dir, discovered_dir, blacklist_dir, targets_dir = [os.path.abspath(os.path.join(core_dir, '..', d)) for d in ['gold_data/features', 'platinum_data/combinations', 'platinum_data/discovered_strategy', 'platinum_data/blacklists', 'platinum_data/targets']]
     os.makedirs(discovered_dir, exist_ok=True); os.makedirs(blacklist_dir, exist_ok=True)
     
-    try:
-        combination_files = [f for f in os.listdir(combinations_dir) if f.endswith('.csv')]
-    except FileNotFoundError:
-        print(f"❌ Directory not found: {combinations_dir}"); combination_files = []
+    # --- NEW: DUAL-MODE FILE DISCOVERY LOGIC ---
+    target_file_arg = sys.argv[1] if len(sys.argv) > 1 else None
 
-    if not combination_files:
-        print("❌ No combination files found.")
-    else:
-        # --- Configure Multiprocessing ---
-        print(f"Found {len(combination_files)} instrument(s) to process.")
-        use_multiprocessing = input("Use multiprocessing? (y/n): ").strip().lower() == 'y'
-        if use_multiprocessing: num_processes = MAX_CPU_USAGE
+    if target_file_arg:
+        # --- Targeted Mode ---
+        print(f"🎯 Targeted Mode: Processing single file '{target_file_arg}'")
+        combinations_path_check = os.path.join(combinations_dir, target_file_arg)
+        if not os.path.exists(combinations_path_check):
+            print(f"❌ Error: Target file not found in platinum_data/combinations: {target_file_arg}")
+            files_to_process = []
         else:
-            try: num_processes = int(input(f"Enter number of processes to use (1-{cpu_count()}): ").strip())
-            except ValueError: num_processes = 1
+            files_to_process = [target_file_arg]
+    else:
+        # --- Discovery Mode (Default) ---
+        print("🔍 Discovery Mode: Scanning for all new files...")
+        try:
+            # Find all available combination files
+            files_to_process = [f for f in os.listdir(combinations_dir) if f.endswith('.csv')]
+        except FileNotFoundError:
+            print(f"❌ Directory not found: {combinations_dir}"); files_to_process = []
+
+    if not files_to_process:
+        print("ℹ️ No combination files found to process.")
+    else:
+        print(f"Found {len(files_to_process)} instrument(s) to process.")
+        
+        # --- Configure Multiprocessing ---
+        if target_file_arg or len(files_to_process) == 1:
+            use_multiprocessing = True
+        else:
+            use_multiprocessing = input("Use multiprocessing? (y/n): ").strip().lower() == 'y'
+        
+        if use_multiprocessing: num_processes = MAX_CPU_USAGE
+        else: num_processes = 1
         
         # --- Main Loop: Process each instrument ---
-        for fname in combination_files:
+        for fname in files_to_process:
             print(f"\n{'='*25}\nProcessing: {fname}\n{'='*25}")
             instrument_name = fname.replace('.csv', '')
             combinations_path, gold_path, discovered_path, blacklist_path = [os.path.join(d, fname) for d in [combinations_dir, gold_features_dir, discovered_dir, blacklist_dir]]
             instrument_target_dir = os.path.join(targets_dir, instrument_name)
             processed_log_path = os.path.join(discovered_dir, f".{fname}.processed_log")
 
+            # --- Pre-computation Checks ---
+            if not os.path.exists(combinations_path):
+                print(f"❌ Combinations file not found for {instrument_name}. Skipping."); continue
+            if not os.path.exists(gold_path):
+                print(f"❌ Gold features file not found for {instrument_name}. Skipping."); continue
             if not os.path.exists(instrument_target_dir):
-                print(f"❌ Target files not found for {instrument_name}. Run extractor first."); continue
+                print(f"❌ Target files directory not found for {instrument_name}. Run extractor first."); continue
             
             # --- Load Blueprints and Validate Keys ---
             all_definitions = pd.read_csv(combinations_path)
             if 'key' not in all_definitions.columns:
-                print(f"❌ FATAL ERROR: 'key' column not found in {fname}. Run the target extractor script first to generate keys.")
-                continue
+                print(f"❌ FATAL ERROR: 'key' column not found in {fname}. Run the target extractor script first."); continue
 
             # --- Blacklist and State Management Logic ---
             # 1. Load the blacklist of failed blueprint KEYS. This is now highly efficient.
@@ -218,8 +252,7 @@ if __name__ == "__main__":
                 print(f"Found {len(blacklisted_keys)} blacklisted blueprints to ignore.")
             except (FileNotFoundError, pd.errors.EmptyDataError):
                 blacklisted_keys = set()
-                print("No blacklist file found or file is empty. Processing all blueprints.")
-
+            
             # 2. Load the log of blueprints already processed in previous runs.
             try:
                 with open(processed_log_path, 'r') as f: processed_keys = set(f.read().splitlines())
@@ -235,7 +268,7 @@ if __name__ == "__main__":
                         cleaned_results = existing_results[~existing_results['key'].isin(blacklisted_keys)]
                         if len(existing_results) > len(cleaned_results):
                             cleaned_results.to_csv(discovered_path, index=False)
-                            print(f"Sanitized results: Removed {len(existing_results) - len(cleaned_results)} old rule(s) for now-blacklisted blueprints.")
+                            print(f"Sanitized results: Removed {len(existing_results) - len(cleaned_results)} old rule(s).")
                 except FileNotFoundError:
                     pass # No existing results to clean.
 
