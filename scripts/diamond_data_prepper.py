@@ -44,7 +44,20 @@ ATR_PERIOD, ADX_PERIOD, PIVOT_WINDOW = 14, 14, 10
 INDICATOR_WARMUP_PERIOD = 200
 
 def robust_read_csv(filepath):
-    """Reads a raw OHLC CSV file reliably."""
+    """
+    Reads a raw OHLC CSV file reliably, handling common formatting inconsistencies.
+
+    This function is designed to be resilient to different CSV delimiters and
+    column counts. It automatically assigns standard column names, adds a dummy
+    volume column if one is not present, converts columns to their proper
+    numeric and datetime formats, and sorts the data by time.
+
+    Args:
+        filepath (str): The full path to the raw input CSV file.
+
+    Returns:
+        pd.DataFrame: A clean, sorted DataFrame with standardized column names.
+    """
     df = pd.read_csv(filepath, header=None, sep=None, engine='python')
     if df.shape[1] > 5:
         df.columns = ['time', 'open', 'high', 'low', 'close', 'volume']
@@ -59,7 +72,22 @@ def robust_read_csv(filepath):
 
 @numba.njit
 def _calculate_s_r_numba(lows, highs, window):
-    """High-performance Numba function for fractal-based S/R."""
+    """
+    Identifies fractal support and resistance points using a high-speed Numba kernel.
+
+    This function iterates through price data and identifies local minima and maxima
+    within a specified rolling window. A low is marked as a support point if it is
+    the lowest value in the surrounding window, and a high is marked as a resistance
+    point if it is the highest.
+
+    Args:
+        lows (np.array): A NumPy array of low prices.
+        highs (np.array): A NumPy array of high prices.
+        window (int): The number of candles to look forward and backward to define the local window.
+
+    Returns:
+        tuple: A tuple of two NumPy arrays (support_points, resistance_points).
+    """
     n = len(lows)
     support, resistance = np.full(n, np.nan, dtype=np.float32), np.full(n, np.nan, dtype=np.float32)
     for i in range(window, n - window):
@@ -70,14 +98,40 @@ def _calculate_s_r_numba(lows, highs, window):
     return support, resistance
 
 def add_support_resistance(df, window=PIVOT_WINDOW):
-    """Wrapper to calculate and forward-fill S/R levels."""
+    """
+    Calculates and adds forward-filled support and resistance levels to the DataFrame.
+
+    This function acts as a wrapper for the core Numba S/R calculation. It calls
+    the high-speed Numba function and then forward-fills the results to ensure
+    every candle has a value for the "last known" support and resistance level.
+
+    Args:
+        df (pd.DataFrame): The input market data DataFrame.
+        window (int): The window size for the fractal calculation.
+
+    Returns:
+        pd.DataFrame: The DataFrame with 'support' and 'resistance' columns added.
+    """
     s_pts, r_pts = _calculate_s_r_numba(df["low"].values.astype(np.float32), df["high"].values.astype(np.float32), window)
     sr_df = pd.DataFrame({'s_pts': s_pts, 'r_pts': r_pts}, index=df.index)
     df["support"], df["resistance"] = sr_df["s_pts"].ffill(), sr_df["r_pts"].ffill()
     return df
 
 def add_all_market_features(df):
-    """Calculates all Silver-layer market features for a raw DataFrame."""
+    """
+    Generates a comprehensive suite of Silver-layer market features for raw OHLC data.
+
+    This function replicates the complete feature engineering process of the
+    Silver layer. It calculates technical indicators, candlestick patterns, market
+    regimes, and support/resistance levels to create a rich, contextual dataset
+    for each candle.
+
+    Args:
+        df (pd.DataFrame): The raw OHLC DataFrame.
+
+    Returns:
+        pd.DataFrame: The original DataFrame enriched with over 200 feature columns.
+    """
     indicator_df = pd.DataFrame(index=df.index)
     for p in SMA_PERIODS: indicator_df[f"SMA_{p}"] = ta.trend.SMAIndicator(df["close"], p).sma_indicator()
     for p in EMA_PERIODS: indicator_df[f"EMA_{p}"] = ta.trend.EMAIndicator(df["close"], p).ema_indicator()
@@ -100,8 +154,26 @@ def add_all_market_features(df):
 
 def create_gold_features(features_df, scaler=None):
     """
-    Performs all Gold-layer ML preprocessing. Can either fit a new scaler or
-    apply a pre-fitted one.
+    Transforms a Silver-layer DataFrame into a Gold-layer, ML-ready dataset.
+
+    This function replicates the Gold-layer preprocessing pipeline. It normalizes
+    absolute price levels, one-hot encodes categorical features, discretizes
+    candlestick pattern scores, and scales all numeric features. Crucially, it
+    can operate in two modes:
+    1. If `scaler` is None, it will create and fit a new `StandardScaler`.
+    2. If a pre-fitted `scaler` is provided, it will use that scaler to `transform`
+       the data, ensuring consistency across different datasets.
+
+    Args:
+        features_df (pd.DataFrame): The Silver-layer DataFrame with all features.
+        scaler (sklearn.preprocessing.StandardScaler, optional): A pre-fitted
+            scaler object. If None, a new one will be fitted. Defaults to None.
+
+    Returns:
+        tuple: A tuple containing:
+               - The transformed, ML-ready Gold DataFrame.
+               - The scaler object used for the transformation (either the one
+                 that was passed in or the newly fitted one).
     """
     df = features_df.copy()
     abs_price_cols = [col for col in df.columns if re.match(r'^(open|high|low|close|SMA_\d+|EMA_\d+|BB_(upper|lower)|support|resistance|ATR_level_.+)$', col)]

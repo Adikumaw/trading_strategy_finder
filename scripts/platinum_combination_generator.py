@@ -34,8 +34,14 @@ import gc
 
 def generate_strategy_definitions(chunked_outcomes_dir):
     """
-    Scans a directory of pre-chunked, enriched outcome files to generate a
-    master list of all unique, binned strategy definitions.
+    Discovers all unique strategy blueprints from an instrument's enriched data chunks.
+
+    This function iterates through a directory of pre-chunked, enriched outcome
+    files. It discretizes the continuous 'placement_pct' features into integer
+    bins and identifies every unique combination of stop-loss and take-profit
+    definitions. It primarily focuses on "semi-dynamic" strategies, where one
+    parameter (SL or TP) is dynamic (binned relative to a market level) and the
+    other is static (a fixed ratio).
 
     Args:
         chunked_outcomes_dir (str): The path to the directory containing the
@@ -43,7 +49,8 @@ def generate_strategy_definitions(chunked_outcomes_dir):
 
     Returns:
         pd.DataFrame: A DataFrame containing all unique strategy blueprints
-                      found in the data, or an empty DataFrame if none are found.
+                      found in the data. Each row represents a distinct strategy
+                      to be tested. Returns an empty DataFrame if none are found.
     """
     print("Scanning chunked outcomes to generate binned strategy definitions...")
     
@@ -77,7 +84,17 @@ def generate_strategy_definitions(chunked_outcomes_dir):
     def to_bin(series):
         """
         Discretizes a continuous percentage series into integer bins.
+
+        This helper function takes a pandas Series of floating-point values
+        (representing placement percentages) and converts them into discrete
+        integer bins by multiplying by 10 and taking the floor.
         Example: A value of 0.85 (85%) becomes bin 8.
+
+        Args:
+            series (pd.Series): The input Series of continuous data.
+
+        Returns:
+            pd.Series: A Series of discrete integer bins.
         """
         return np.floor(series * 10).astype('Int64')
 

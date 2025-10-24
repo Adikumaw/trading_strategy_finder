@@ -25,11 +25,11 @@ A strategy that looks perfect on one dataset is often a fluke—a result of over
 
 The workflow is a clear, sequential process of filtering and deep validation.
 
-#### **Stage 1: Run `diamond_data_prepper.py`**
+#### **Stage 0: Run `diamond_data_prepper.py`**
 
 - This is a one-time utility that must be run first. It takes all the raw market data, runs it through the full `Silver -> Gold` feature generation pipeline, and saves the final, analysis-ready `_silver.parquet` and `_gold.parquet` files to the `diamond_data/prepared_data/` directory. This "prepare once, test many" approach makes the backtesting stages incredibly fast.
 
-#### **Stage 2: Run `diamond_backtester.py` (Mastery Engine)**
+#### **Stage 1: Run `diamond_backtester.py` (Mastery Engine)**
 
 - **Job:** You select a `discovered_strategy` file to test (e.g., `XAUUSD15.csv`).
 - **Logic:**
@@ -41,9 +41,9 @@ The workflow is a clear, sequential process of filtering and deep validation.
 - **Output:**
   1.  `zircon_data/input/master_strategies_...csv`: A filtered list of only the strategies that passed the strict "mastery" performance thresholds.
   2.  `diamond_data/backtesting_results/diamond_report_...csv`: A detailed report of the performance of _all_ tested strategies on the origin market.
-  3.  `platinum_data/blacklists/...csv`: An updated blacklist of the parent blueprints of all failed strategies.
+  3.  `platinum_data/blacklists/...csv`: An updated blacklist of the parent blueprints (`keys`) of all failed strategies.
 
-#### **Stage 3: Run `zircon_validator.py` (The Ultimate Judge)**
+#### **Stage 2: Run `zircon_validator.py` (The Ultimate Judge)**
 
 - **Job:** You select a `master_strategies_...csv` file from the `zircon_data/input/` directory.
 - **Logic:**

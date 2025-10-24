@@ -60,12 +60,40 @@ MARKET_CONFIG = {
 # --- HELPER & SIMULATION FUNCTIONS (SYNCHRONIZED WITH ZIRCON LAYER) ---
 
 def get_dynamic_price(entry_price, level_price, placement_bin):
-    """Calculates the absolute SL/TP price from a binned placement."""
+    """
+    Calculates an absolute price for a dynamic Stop-Loss or Take-Profit.
+
+    This function translates a discretized placement bin into a concrete price
+    level. It assumes the bin represents a 10% range and uses the midpoint
+    (e.g., bin 8 represents 85%) to calculate the target price relative to the
+    distance between the entry and the reference market level (e.g., an SMA).
+
+    Args:
+        entry_price (float): The price at which the trade is entered.
+        level_price (float): The price of the reference market level (e.g., SMA_50).
+        placement_bin (int): The integer bin representing the placement (e.g., 8).
+
+    Returns:
+        float: The calculated absolute price for the SL or TP.
+    """
     placement_ratio = (placement_bin + 0.5) / 10.0
     return entry_price + (level_price - entry_price) * placement_ratio
 
 def calculate_sharpe_ratio(pnl_series):
-    """Calculates the annualized Sharpe Ratio for a series of trade PnLs."""
+    """
+    Calculates the annualized Sharpe Ratio from a series of trade PnLs.
+
+    This function measures the risk-adjusted return of the backtest. It
+    annualizes the result based on an estimated number of trading days per
+    year to provide a standardized metric for comparison.
+
+    Args:
+        pnl_series (pd.Series): A pandas Series containing the PnL of each individual trade.
+
+    Returns:
+        float: The calculated annualized Sharpe Ratio. Returns 0.0 if calculation
+               is not possible (e.g., standard deviation is zero).
+    """
     if pnl_series.std() == 0 or len(pnl_series) < 2: return 0.0
     daily_returns = pnl_series / INITIAL_CAPITAL
     excess_returns = daily_returns - (ANNUAL_RISK_FREE_RATE / TRADES_PER_YEAR_ESTIMATE)
@@ -73,8 +101,27 @@ def calculate_sharpe_ratio(pnl_series):
 
 def simulate_trades(strategy, entries, full_silver_data, market_config):
     """
-    The definitive, high-fidelity backtesting engine, synchronized with the Zircon
-    layer to ensure consistent results. Includes corrected sell-side logic.
+    Executes a high-fidelity, event-driven backtest for a single strategy.
+
+    This is the definitive backtesting engine, synchronized with the Zircon layer
+    to ensure perfectly consistent results. For each entry signal, it calculates
+    precise SL/TP levels, determines position size based on a fixed fractional
+    risk model, and simulates the trade's outcome by iterating through future
+    candles. It accurately models slippage, spread, and commissions.
+
+    Args:
+        strategy (dict): A dictionary representing the complete strategy, including
+                         the blueprint and market rule.
+        entries (pd.DataFrame): A DataFrame of the candles that triggered an entry signal.
+        full_silver_data (pd.DataFrame): The complete, feature-rich market data used
+                                         for looking up future candle outcomes.
+        market_config (dict): A dictionary of market-specific parameters like spread
+                              and commission.
+
+    Returns:
+        dict or None: A dictionary containing key performance metrics (Profit Factor,
+                      Sharpe Ratio, Max Drawdown, etc.) for the backtest. Returns None
+                      if no valid trades could be executed.
     """
     trades, capital = [], INITIAL_CAPITAL
     time_to_idx = {time: i for i, time in enumerate(full_silver_data['time'])}
@@ -143,7 +190,25 @@ def simulate_trades(strategy, entries, full_silver_data, market_config):
             'win_rate_pct': (len(wins) / len(log)) * 100 if len(log) > 0 else 0}
 
 def run_backtest_for_strategy(strategy_dict, market_data_cache, origin_market_csv):
-    """The main worker function for multiprocessing."""
+    """
+    Orchestrates the backtest for a single strategy, serving as the worker for multiprocessing.
+
+    This function acts as a wrapper that prepares the necessary data for the main
+    `simulate_trades` engine. It queries the Gold feature data to find all entry
+    signals for a given market rule, retrieves the corresponding raw candle data
+    from the Silver DataFrame, and then passes everything to the simulation
+    function to generate performance results.
+
+    Args:
+        strategy_dict (dict): A dictionary representing a single, complete strategy.
+        market_data_cache (dict): A cache holding the prepared Silver and Gold DataFrames.
+        origin_market_csv (str): The filename of the market the strategy was discovered on.
+
+    Returns:
+        dict or None: A dictionary containing the full, combined results (strategy
+                      definition + performance metrics + regime analysis), or None
+                      if the backtest fails or produces no trades.
+    """
     strategy, market_name = strategy_dict, origin_market_csv.replace('.csv', '')
     silver_df, gold_df = market_data_cache[origin_market_csv]['silver'], market_data_cache[origin_market_csv]['gold']
     try:

@@ -70,26 +70,30 @@ def find_winning_trades_numba(
     sl_ratios, tp_ratios, max_lookforward, spread_cost, processing_limit
 ):
     """
-    The high-performance core of the simulation engine, JIT-compiled with Numba.
+    Executes the core trade simulation logic at high speed using Numba.
 
-    This function iterates through a chunk of candles and simulates all possible
-    buy and sell trades for each one, based on the provided SL/TP ratios. It
-    checks future candles to see if a trade would have hit its TP before its SL.
+    This function is the performance-critical engine of the script. It iterates
+    through a pre-loaded chunk of candlestick data and, for each candle, simulates
+    every possible buy and sell trade defined by the grid of Stop-Loss (SL) and
+    Take-Profit (TP) ratios. It then looks forward in the data to determine if
+    a trade would have hit its TP before its SL, accounting for spread costs.
+    Only profitable trades are recorded.
 
     Args:
-        close_prices (np.array): Array of closing prices for the chunk.
-        high_prices (np.array): Array of high prices for the chunk.
-        low_prices (np.array): Array of low prices for the chunk.
-        timestamps (np.array): Array of timestamps (as int64) for the chunk.
-        sl_ratios (np.array): Array of stop-loss ratios to test.
-        tp_ratios (np.array): Array of take-profit ratios to test.
-        max_lookforward (int): Max number of future candles to check.
-        spread_cost (float): The pre-calculated spread cost for the instrument.
-        processing_limit (int): The number of candles in the chunk to actually
-                                 process, excluding the overlapping lookahead portion.
+        close_prices (np.array): A NumPy array of closing prices for the data chunk.
+        high_prices (np.array): A NumPy array of high prices for the data chunk.
+        low_prices (np.array): A NumPy array of low prices for the data chunk.
+        timestamps (np.array): A NumPy array of timestamps (as int64) for each candle.
+        sl_ratios (np.array): A NumPy array of stop-loss ratios to be tested.
+        tp_ratios (np.array): A NumPy array of take-profit ratios to be tested.
+        max_lookforward (int): The maximum number of future candles to check for an outcome.
+        spread_cost (float): The calculated spread cost for the instrument, applied to TP levels.
+        processing_limit (int): The number of candles within the chunk to process,
+                                 which excludes the overlapping lookahead data at the end.
 
     Returns:
-        list: A list of tuples, where each tuple represents a profitable trade.
+        list: A list of tuples, where each tuple contains the details of a
+              single profitable trade found during the simulation.
     """
     all_profitable_trades = []
     # Loop only up to the processing_limit to avoid re-processing the overlapping candles
@@ -133,15 +137,23 @@ def find_winning_trades_numba(
 
 def get_config_from_filename(filename):
     """
-    Parses an input filename to automatically determine the instrument, timeframe,
-    and the corresponding simulation configuration (SL/TP presets and spread).
+    Parses a filename to extract the instrument and timeframe, then retrieves the correct preset.
+
+    This function uses regular expressions to identify the trading instrument
+    (e.g., "EURUSD", "XAUUSD") and the chart timeframe (e.g., "15", "60") from
+    the input CSV filename. It then calculates the appropriate spread cost in
+    the instrument's quote currency and retrieves the corresponding simulation
+    parameters from the TIMEFRAME_PRESETS global dictionary.
 
     Args:
         filename (str): The name of the raw data file (e.g., "XAUUSD15.csv").
 
     Returns:
-        tuple: A tuple containing the configuration dictionary and the calculated
-               spread cost. Returns (None, None) if parsing fails.
+        tuple: A tuple containing two elements:
+               - The configuration dictionary from TIMEFRAME_PRESETS.
+               - The calculated spread cost as a float.
+               Returns (None, None) if the filename cannot be parsed or if no
+               matching preset is found.
     """
     # Use regex to extract the instrument name and timeframe number from the filename
     match = re.search(r'([A-Z0-9]+?)(\d+)\.csv$', filename)

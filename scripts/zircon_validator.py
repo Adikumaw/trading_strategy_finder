@@ -52,12 +52,42 @@ MAX_CPU_USAGE = max(1, cpu_count() - 2)
 # --- HELPER & SIMULATION FUNCTIONS ---
 
 def get_dynamic_price(entry_price, level_price, placement_bin):
-    """Calculates the absolute SL/TP price from a binned placement."""
+    """
+    Calculates an absolute price for a dynamic Stop-Loss or Take-Profit.
+
+    This function translates a discretized placement bin into a concrete price
+    level. It assumes the bin represents a 10% range and uses the midpoint
+    (e.g., bin 8 represents 85%) to calculate the target price relative to the
+    distance between the entry and the reference market level (e.g., an SMA).
+
+    Args:
+        entry_price (float): The price at which the trade is entered.
+        level_price (float): The price of the reference market level (e.g., SMA_50).
+        placement_bin (int): The integer bin representing the placement (e.g., 8).
+
+    Returns:
+        float: The calculated absolute price for the SL or TP.
+    """
     placement_ratio = (placement_bin + 0.5) / 10.0
     return entry_price + (level_price - entry_price) * placement_ratio
 
 def calculate_sharpe_ratio(pnl_series, risk_free_rate, trades_per_year):
-    """Calculates the annualized Sharpe Ratio for a series of trade PnLs."""
+    """
+    Calculates the annualized Sharpe Ratio from a series of trade PnLs.
+
+    This function measures the risk-adjusted return of the backtest. It
+    annualizes the result based on an estimated number of trading days per
+    year to provide a standardized metric for comparison.
+
+    Args:
+        pnl_series (pd.Series): A pandas Series containing the PnL of each individual trade.
+        risk_free_rate (float): The annualized risk-free rate of return.
+        trades_per_year (int): An estimate of the number of trading periods in a year.
+
+    Returns:
+        float: The calculated annualized Sharpe Ratio. Returns np.inf if the
+               standard deviation of returns is zero.
+    """
     if pnl_series.std() == 0 or len(pnl_series) < 2: return np.inf
     daily_returns = pnl_series / INITIAL_CAPITAL
     excess_returns = daily_returns - (risk_free_rate / trades_per_year)
@@ -65,12 +95,27 @@ def calculate_sharpe_ratio(pnl_series, risk_free_rate, trades_per_year):
 
 def simulate_trades(strategy, entries, full_silver_data, market_config):
     """
-    UPGRADED simulation engine.
+    Executes a high-fidelity backtest and returns both performance stats and a trade log.
 
-    This version is enhanced to return two outputs:
-    1. A dictionary of overall performance statistics.
-    2. A detailed list of every individual trade, which will be saved as a trade log.
-    It also includes the definitive bug fix for correctly simulating sell trades.
+    This enhanced simulation engine performs an event-driven backtest for a given
+    strategy. It accurately models costs (slippage, spread, commission), calculates
+    position size using a fixed fractional risk model, and determines the outcome
+    of each trade by iterating through future candles. This version is upgraded to
+    return not only the aggregate performance statistics but also a detailed,
+    trade-by-trade log suitable for in-depth analysis and visualization.
+
+    Args:
+        strategy (dict): A dictionary representing the complete strategy blueprint and rule.
+        entries (pd.DataFrame): A DataFrame of the candles that triggered an entry signal.
+        full_silver_data (pd.DataFrame): The complete market data used for looking up future prices.
+        market_config (dict): A dictionary of market-specific parameters like spread and commission.
+
+    Returns:
+        tuple: A tuple containing two elements:
+               - A dictionary of key performance metrics (Profit Factor, Sharpe Ratio, etc.).
+               - A list of dictionaries, where each inner dictionary represents a single
+                 executed trade with its entry/exit times and PnL.
+               Returns (None, None) if no valid trades could be executed.
     """
     trades, trade_log_for_export = [], []
     capital = INITIAL_CAPITAL
@@ -146,8 +191,24 @@ def simulate_trades(strategy, entries, full_silver_data, market_config):
 
 def run_validation_for_strategy(strategy, market_data_cache, market_csv, trade_logs_dir):
     """
-    The main worker function for multiprocessing. It backtests a single strategy
-    on a single market and, if successful, saves its detailed trade log to disk.
+    Orchestrates the validation test for one strategy on one market.
+
+    This is the main worker function for multiprocessing. It prepares the data
+    for a given strategy/market pair, calls the `simulate_trades` engine, and if
+    the backtest is successful, saves the resulting detailed trade log to a
+    dedicated directory. It then packages the performance summary for aggregation
+    into the final reports.
+
+    Args:
+        strategy (dict): A dictionary representing a single, complete strategy.
+        market_data_cache (dict): A cache holding the prepared Silver and Gold DataFrames
+                                for the target market.
+        market_csv (str): The filename of the market to be tested on.
+        trade_logs_dir (str): The root directory where trade logs should be saved.
+
+    Returns:
+        dict or None: A dictionary containing the full, combined results (strategy
+                      definition + performance metrics), or None if the backtest fails.
     """
     market_name = market_csv.replace('.csv', '')
     # The market data is passed in a cache for efficiency
@@ -227,7 +288,7 @@ if __name__ == "__main__":
     detailed_report_path = os.path.join(zircon_results_dir, f"detailed_report_{origin_market_name_full}.csv")
     processed_log_path = os.path.join(zircon_results_dir, f".{origin_market_name_full}.processed_log")
     try:
-        with open(processed_log_path, 'r') as f: processed_markets = set(f.read().splitlines())
+        with open(processed_log_path, 'r') in f: processed_markets = set(f.read().splitlines())
         markets_to_process = [m for m in markets_to_test if m not in processed_markets]
         print(f"\nFound {len(processed_markets)} previously completed markets. Resuming with {len(markets_to_process)} remaining.")
     except FileNotFoundError:

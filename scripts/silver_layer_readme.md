@@ -9,7 +9,7 @@ Its purpose is to add the "why" to the "what." The Bronze layer tells us _what_ 
 The Silver Layer is a sophisticated data processing script that operates in two distinct, sequential stages for each instrument:
 
 1.  **Market Feature Generation:** It first consumes the raw OHLC price data and calculates a massive suite of over 200 technical indicators, candlestick patterns, and custom market context features for _every single candle_ in the historical data. This creates a complete, candle-by-candle "fingerprint" of the market's state over time.
-2.  **Trade Enrichment & Chunking:** It then reads the enormous Bronze Dataset in memory-safe chunks. For each winning trade, it merges the pre-calculated market features from the entry candle. Crucially, it then calculates a powerful set of **relational positioning features**, which describe _where_ a trade's SL and TP were placed relative to the market structures at that time.
+2.  **Trade Enrichment & Chunking:** It then reads the enormous Bronze Dataset in memory-safe chunks. For each winning trade, it looks up the pre-calculated market features from the entry candle. Crucially, it then calculates a powerful set of **relational positioning features**, which describe _where_ a trade's SL and TP were placed relative to the market structures at that time.
 
 The final output is not a single large file, but two distinct sets of data: a clean market features file and a directory of enriched, chunked outcome files.
 
@@ -17,28 +17,28 @@ The final output is not a single large file, but two distinct sets of data: a cl
 
 Raw trade data is insufficient for discovering strategies. A winning trade is not just an entry and an exit; it's an action taken within a specific market context. The Silver Layer is critical for two reasons:
 
-1.  **Preventing Lookahead Bias:** By generating all market features _before_ enriching the trades, and then using a point-in-time merge (`merge_asof`), we guarantee that the features associated with a trade were known at the time of entry. This is a critical step to prevent data leakage and ensure the integrity of the downstream machine learning models.
+1.  **Preventing Lookahead Bias:** By generating all market features first and then using a point-in-time correct lookup (`reindex(method='ffill')`) to find the features for each trade's entry time, we guarantee that the data associated with a trade was known _at the moment of entry_. This is a critical step to prevent data leakage and ensure the integrity of downstream machine learning models.
 2.  **Creating Deep Contextual Features:** This is the most innovative part of the layer. Instead of just knowing that `RSI` was `25`, our system now knows that "the TP was placed 90% of the way to the daily resistance" or "the SL was placed just 10 basis points behind the lower Bollinger Band." This transforms the problem from simple indicator-checking to a much more sophisticated analysis of trade structure relative to market structure.
 
 ## How It Works
 
-The script is a highly optimized, two-step process designed for performance and memory safety.
+The script is a highly optimized, two-step process designed for maximum performance and memory safety.
 
 1.  **Step 1: Build the `features` Dataset:**
 
     - It loads the raw OHLCV data from the `raw_data` directory.
     - It efficiently calculates features in batches:
       - **Indicators:** Standard indicators like `SMA`, `EMA`, `RSI`, `MACD`, `Bollinger Bands`, and `ATR` are calculated using the `ta` library.
-      - **Candlestick Patterns:** All 61 classic candlestick patterns are generated using the `talib` library.
+      - **Candlestick Patterns:** All classic candlestick patterns are generated using the `talib` library.
       - **Support & Resistance:** Key price levels are identified using a fractal-based algorithm, which is JIT-compiled with `numba` for C-like speed.
       - **Market Regimes:** Custom features like trading session, day of the week, and market state (trending/ranging, high/low volatility) are derived.
     - This complete market context is saved as a single, clean file to `silver_data/features/`.
 
 2.  **Step 2: Build the Enriched `outcomes` Chunks:**
-    - It reads the massive `bronze_data` file in manageable chunks (e.g., 500,000 rows at a time) to maintain a low memory footprint.
-    - For each chunk of trades, it performs a `pandas.merge_asof` to join the market features that were valid at each trade's `entry_time`.
-    - It then calculates the **positioning features** for every trade, providing deep relational context.
-    - The final, enriched trade data is written out directly into a new `chunk_X.csv` file in the `silver_data/chunked_outcomes/{instrument}/` directory. This avoids creating another single, multi-gigabyte file and prepares the data perfectly for the parallel processing required by the Platinum Layer.
+    - **Pre-computation:** Before processing any trades, it builds a set of highly efficient lookup structures from the features file. This includes a NumPy array of the feature values and a fast mapping from timestamps to row numbers.
+    - **Chunked Processing:** It reads the massive `bronze_data` file in manageable chunks (e.g., 500,000 rows at a time) to maintain a low memory footprint.
+    - **Optimized Lookup:** For each chunk, instead of performing a slow, memory-intensive merge, it uses the pre-computed structures to instantly look up the correct market data for every trade directly from the NumPy array. This is the core performance optimization.
+    - **Enrichment & Output:** It then calculates the **positioning features** for every trade using fast, vectorized NumPy operations. The final, enriched trade data is written out directly into a new `chunk_X.csv` file in the `silver_data/chunked_outcomes/{instrument}/` directory. This avoids creating another single, multi-gigabyte file and prepares the data perfectly for the parallel processing required by the Platinum Layer.
 
 ## 📁 Folder Structure
 

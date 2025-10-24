@@ -28,7 +28,7 @@ The script is a simple but powerful "assembly line" of data transformations, opt
 3.  **Core Transformation (`create_gold_features`):** Each worker process executes a series of transformations on its assigned DataFrame:
     - **Relational Transformation:** All columns representing an absolute price (e.g., `open`, `high`, `low`, `SMA_50`, `support`) are identified. Each one is converted into a new column representing its normalized distance from that candle's `close` price. The original price columns are then dropped.
     - **Categorical Encoding:** Text-based columns like `session`, `trend_regime`, and `vol_regime` are converted into multiple binary (0/1) columns using one-hot encoding.
-    - **Pattern Compression:** The scores from all 61 `TA-Lib` candlestick patterns (ranging from -100 to 100) are binned into a simple 5-point scale (`-1.0, -0.5, 0.0, 0.5, 1.0`).
+    - **Pattern Compression:** The scores from all `TA-Lib` candlestick patterns (ranging from -100 to 100) are binned into a simple 5-point scale (`-1.0, -0.5, 0.0, 0.5, 1.0`).
     - **Standardization:** All remaining numerical columns (e.g., `RSI`, `ADX`, `BB_width`) are scaled using `sklearn.preprocessing.StandardScaler`.
     - **Cleanup & Downcasting:** The script drops any remaining original columns, leaving only the newly created ML-ready features. Data types are downcast (e.g., `float64` to `float32`) to reduce the final file size.
 4.  **Save Output:** The final, fully transformed DataFrame is saved to the `gold_data/features/` directory.
