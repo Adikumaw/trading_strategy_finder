@@ -1,4 +1,4 @@
-# app.py (V10 - Final Version with Market Trend Context Chart)
+# app.py (V11 - Robust Visualization Engine)
 
 """
 The Strategy Post-Mortem Dashboard (The Analyser)
@@ -14,9 +14,9 @@ performance. It helps answer critical questions like:
 - Under what specific market conditions (regimes) does it thrive or fail?
 - Did the strategy get lucky by aligning with a strong market trend?
 
-The dashboard is structured to guide the user from a high-level overview of all
-robust strategies down to a granular, trade-by-trade analysis in the context
-of the market's price history.
+This version includes robust visualization logic to gracefully handle edge cases
+like infinite Profit Factors (from 100% win rates) and zero-drawdown performance,
+ensuring all charts are stable and readable.
 """
 
 import streamlit as st
@@ -33,9 +33,10 @@ import numpy as np
 st.set_page_config(page_title="Strategy Post-Mortem", page_icon="🕵️", layout="wide")
 # A cap for Sharpe Ratio values to prevent extreme outliers from skewing charts.
 SHARPE_CAP = 10.0
+# A display cap for Profit Factor for consistent visualization of 'infinite' PF.
+PF_CAP = 100.0
 
 # --- Path Configuration ---
-# Defines the directory structure for loading all necessary report and data files.
 CORE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 DIAMOND_RESULTS_DIR = os.path.join(CORE_DIR, 'diamond_data', 'backtesting_results')
 ZIRCON_RESULTS_DIR = os.path.join(CORE_DIR, 'zircon_data', 'results')
@@ -48,36 +49,34 @@ TRADE_LOGS_DIR = os.path.join(CORE_DIR, 'zircon_data', 'trade_logs')
 @st.cache_data(ttl=600)
 def get_available_reports():
     """
-    Scans the Zircon results directory to find all available summary reports
-    that can be analyzed by the dashboard.
+    Scans the Zircon results directory to find all available summary reports.
     """
     if not os.path.exists(ZIRCON_RESULTS_DIR): return []
     pattern = re.compile(r"summary_report_(.+)\.csv")
     files = os.listdir(ZIRCON_RESULTS_DIR)
-    reports = [pattern.match(f).group(1) for f in files if pattern.match(f)]
-    return sorted(reports)
+    return sorted([pattern.match(f).group(1) for f in files if pattern.match(f)])
 
 @st.cache_data(ttl=600)
 def load_and_merge_data(report_name):
     """
-    Loads and merges the three key data files for a selected report:
-    1. Zircon Summary Report (high-level validation stats)
-    2. Zircon Detailed Report (per-market validation stats)
-    3. Diamond Mastery Report (origin-market stats)
-    It renames columns for clarity and cleans the data for display.
+    Loads and merges the Zircon Summary, Zircon Detailed, and Diamond Mastery
+    reports. It robustly cleans the data, capping infinite values for stable
+    visualization and analysis.
     """
     if not report_name: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    
     zircon_summary_path = os.path.join(ZIRCON_RESULTS_DIR, f"summary_report_{report_name}.csv")
     zircon_detailed_path = os.path.join(ZIRCON_RESULTS_DIR, f"detailed_report_{report_name}.csv")
+    diamond_report_path = os.path.join(DIAMOND_RESULTS_DIR, f"diamond_report_{report_name}.csv")
+
     if not os.path.exists(zircon_summary_path): return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    
+
     zircon_summary_df = pd.read_csv(zircon_summary_path)
     zircon_detailed_df = pd.read_csv(zircon_detailed_path)
-    diamond_report_path = os.path.join(DIAMOND_RESULTS_DIR, f"diamond_report_{report_name}.csv")
     mastery_df = pd.read_csv(diamond_report_path) if os.path.exists(diamond_report_path) else pd.DataFrame()
-    
-    # Rename columns for a clean, merged view
+
     zircon_renamed = zircon_summary_df.rename(columns={'avg_profit_factor': 'validation_avg_pf', 'avg_sharpe_ratio': 'validation_avg_sharpe', 'avg_max_drawdown_pct': 'validation_avg_dd_pct', 'total_trades': 'validation_total_trades', 'validation_markets_passed': 'validation_passed'})
+    
     if not mastery_df.empty:
         mastery_renamed = mastery_df.rename(columns={'profit_factor': 'mastery_pf', 'sharpe_ratio': 'mastery_sharpe', 'max_drawdown_pct': 'mastery_dd_pct', 'total_trades': 'mastery_total_trades'})
         master_view_df = pd.merge(zircon_renamed, mastery_renamed[['strategy_id', 'mastery_pf', 'mastery_sharpe', 'mastery_dd_pct', 'mastery_total_trades']], on='strategy_id', how='left')
@@ -85,83 +84,66 @@ def load_and_merge_data(report_name):
         master_view_df = zircon_renamed.copy()
         for col in ['mastery_pf', 'mastery_sharpe', 'mastery_dd_pct', 'mastery_total_trades']: master_view_df[col] = np.nan
     
-    # Clean and cap values for better visualization
+    # VISUALIZATION FIX: Clean and cap values for better charts.
     for col in ['mastery_pf', 'validation_avg_pf']:
-        if col in master_view_df.columns: master_view_df[col] = master_view_df[col].replace(np.inf, 999)
+        if col in master_view_df.columns: master_view_df[col] = master_view_df[col].replace([np.inf, -np.inf], PF_CAP)
     for col in ['mastery_sharpe', 'validation_avg_sharpe']:
-        if col in master_view_df.columns: master_view_df[col] = master_view_df[col].replace(np.inf, SHARPE_CAP).clip(upper=SHARPE_CAP)
+        if col in master_view_df.columns: master_view_df[col] = master_view_df[col].replace([np.inf, -np.inf], SHARPE_CAP).clip(upper=SHARPE_CAP)
         
     return master_view_df, zircon_detailed_df, mastery_df
 
-def write_to_blacklist(strategy_blueprint, report_name):
+def write_to_blacklist(strategy_key, report_name):
     """
-    Adds a strategy's parent blueprint to the blacklist file for its origin
-    market, effectively preventing it from being discovered in future runs.
+    Appends a strategy's unique 'key' to the blacklist file, preventing its
+    parent blueprint from being discovered in future Platinum runs.
     """
     blacklist_path = os.path.join(BLACKLIST_DIR, f"{report_name}.csv")
-    key_cols = ['type', 'sl_def', 'sl_bin', 'tp_def', 'tp_bin']
-    blueprint_to_add = pd.DataFrame([strategy_blueprint[key_cols].to_dict()])
+    key_to_add = pd.DataFrame([{'key': strategy_key}])
     try:
         blacklist_df = pd.read_csv(blacklist_path)
-    except FileNotFoundError:
-        blacklist_df = pd.DataFrame(columns=key_cols)
-    updated_blacklist = pd.concat([blacklist_df, blueprint_to_add], ignore_index=True).drop_duplicates()
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        blacklist_df = pd.DataFrame(columns=['key'])
+    updated_blacklist = pd.concat([blacklist_df, key_to_add], ignore_index=True).drop_duplicates()
     updated_blacklist.to_csv(blacklist_path, index=False)
-    st.toast(f"Strategy blueprint blacklisted in {report_name}.csv!")
-    st.cache_data.clear() # Clear cache to force a reload of data
+    st.toast(f"Blueprint key {strategy_key[:10]}... blacklisted in {report_name}.csv!")
+    st.cache_data.clear()
 
 @st.cache_data(ttl=3600)
 def load_market_internals(markets):
     """
-    For a list of markets, loads their prepared Silver data to calculate
-    high-level characteristics (e.g., % time in trend, overall volatility).
-    This helps determine if a strategy's performance was due to a specific
-    market personality.
+    Loads Silver data to calculate high-level market characteristics like
+    trendiness and volatility.
     """
     internals = []
     for market_name in markets:
         silver_path = os.path.join(PREPARED_DATA_DIR, f"{market_name.replace('.csv','')}_silver.parquet")
         if os.path.exists(silver_path):
             df = pd.read_parquet(silver_path, columns=['trend_regime', 'vol_regime', 'BB_width', 'close'])
-            trend_pct = df['trend_regime'].value_counts(normalize=True).get('trend', 0) * 100
-            vol_pct = df['vol_regime'].value_counts(normalize=True).get('high_vol', 0) * 100
-            avg_bbw = df['BB_width'].mean()
-            price_change = (df['close'].iloc[-1] - df['close'].iloc[0]) / df['close'].iloc[0] * 100
-            internals.append({'market': market_name, '% Time in Trend': trend_pct, '% Time High Vol': vol_pct, 'Avg BB Width': avg_bbw, 'Overall Price Change %': price_change})
+            internals.append({
+                'market': market_name, 
+                '% Time in Trend': df['trend_regime'].value_counts(normalize=True).get('trend', 0) * 100,
+                '% Time High Vol': df['vol_regime'].value_counts(normalize=True).get('high_vol', 0) * 100,
+                'Avg BB Width': df['BB_width'].mean(),
+                'Overall Price Change %': (df['close'].iloc[-1] - df['close'].iloc[0]) / df['close'].iloc[0] * 100
+            })
     return pd.DataFrame(internals)
 
 @st.cache_data(ttl=3600)
 def load_full_silver_data(market_name):
-    """Loads the time and close price from a market's Silver data file."""
+    """Loads time and close price from a market's Silver data."""
     silver_path = os.path.join(PREPARED_DATA_DIR, f"{market_name.replace('.csv','')}_silver.parquet")
-    if os.path.exists(silver_path):
-        df = pd.read_parquet(silver_path, columns=['time', 'close'])
-        df['time'] = pd.to_datetime(df['time'])
-        return df
-    return None
+    return pd.read_parquet(silver_path, columns=['time', 'close']) if os.path.exists(silver_path) else None
 
 @st.cache_data(ttl=600)
 def load_trade_log(strategy_id, market_name):
-    """
-    Loads the detailed, trade-by-trade log for a specific strategy on a
-    specific market, generated by the Zircon Validator.
-    """
+    """Loads the detailed trade log for a strategy on a market."""
     log_path = os.path.join(TRADE_LOGS_DIR, strategy_id, f"{market_name.replace('.csv','')}.csv")
-    if os.path.exists(log_path):
-        df = pd.read_csv(log_path)
-        df['entry_time'] = pd.to_datetime(df['entry_time'])
-        return df
-    return None
+    return pd.read_csv(log_path, parse_dates=['entry_time']) if os.path.exists(log_path) else None
 
 def parse_dict_col(data_string):
-    """
-    Safely parses a string representation of a dictionary into a Python dict.
-    Used for the regime analysis columns.
-    """
-    try:
-        return ast.literal_eval(str(data_string))
-    except:
-        return {}
+    """Safely parses a string representation of a dictionary."""
+    try: return ast.literal_eval(str(data_string))
+    except: return {}
 
 # --- UI START ---
 
@@ -171,21 +153,18 @@ st.title("🕵️ Strategy Post-Mortem Dashboard")
 st.sidebar.title("Controls")
 available_reports = get_available_reports()
 if not available_reports:
-    st.error(f"No Zircon result files found in `{ZIRCON_RESULTS_DIR}`")
-    st.stop()
+    st.error(f"No Zircon summary reports found in `{ZIRCON_RESULTS_DIR}`"); st.stop()
 
 selected_report = st.sidebar.selectbox("Select Report to Analyze", options=available_reports, key="report_selector")
 master_df, detailed_df, mastery_df = load_and_merge_data(selected_report)
 if master_df.empty:
-    st.warning(f"Could not load data for **{selected_report}**.")
-    st.stop()
+    st.warning(f"Could not load data for **{selected_report}**."); st.stop()
 
-# --- Sidebar Filters for Strategy Discovery ---
+# --- Sidebar Filters ---
 st.sidebar.header("Filter Strategies")
 if st.sidebar.button("Reset All Filters"):
-    st.session_state.m_pf, st.session_state.m_sh, st.session_state.v_pf = 0.0, 0.0, 0.0
-    st.session_state.v_pass = '0/0'
-    st.rerun()
+    st.session_state.m_pf, st.session_state.m_sh, st.session_state.v_pf = 1.5, 1.0, 1.0
+    st.session_state.v_pass = '0/0'; st.rerun()
 
 st.sidebar.markdown("**Mastery Filters (Origin Market)**")
 mastery_pf_min = st.sidebar.slider("Min Mastery PF", 0.0, 10.0, 1.5, 0.1, key='m_pf')
@@ -193,14 +172,11 @@ mastery_sharpe_min = st.sidebar.slider("Min Mastery Sharpe", 0.0, SHARPE_CAP, 1.
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Validation Filters (Other Markets)**")
 validation_pf_min = st.sidebar.slider("Min Validation Avg PF", 0.0, 5.0, 1.0, 0.1, key='v_pf')
-pass_options = sorted([opt for opt in master_df['validation_passed'].unique() if pd.notna(opt)], key=lambda x: (int(x.split('/')[1]), int(x.split('/')[0])), reverse=True)
-if not pass_options: pass_options = ['0/0']
+pass_options = sorted(master_df['validation_passed'].dropna().unique(), key=lambda x: (int(x.split('/')[1]), int(x.split('/')[0])), reverse=True)
 min_markets_passed_str = st.sidebar.selectbox("Min Validation Markets Passed", options=pass_options, key='v_pass')
 
-# Apply all selected filters to the main DataFrame
 min_passed_count = int(min_markets_passed_str.split('/')[0])
 filtered_df = master_df.copy()
-# Fill NaNs to ensure filters work correctly
 for col in ['mastery_pf', 'mastery_sharpe', 'validation_avg_pf', 'validation_markets_passed_count']:
     filtered_df[col] = filtered_df[col].fillna(0)
 filtered_df = filtered_df[
@@ -214,114 +190,83 @@ filtered_df = filtered_df[
 tab1, tab2 = st.tabs(["🏆 Strategy Dashboard", "🕵️ Post-Mortem Analysis"])
 
 with tab1:
-    # --- High-level dashboard for viewing filtered strategies ---
     st.header(f"Strategy Dashboard for `{selected_report}`")
     st.info("Use the sidebar filters to discover robust strategies. The table below shows the survivors.")
     st.metric("Robust Strategies Found", f"{len(filtered_df)} / {len(master_df)}")
     
-    display_cols = {'strategy_id': 'ID', 'mastery_pf': 'Mastery PF', 'mastery_sharpe': 'Mastery Sharpe', 'validation_avg_pf': 'Validation PF', 'validation_passed': 'Passed', 'market_rule': 'Market Rule'}
-    
-    # Pagination for the strategy table
-    page_size = st.number_input("Strategies per page:", 10, 100, 20, 5, key="page_size")
-    total_pages = max(1, (len(filtered_df) - 1) // page_size + 1)
-    current_page = st.number_input("Page:", 1, total_pages, 1, 1, key="page_num")
-    start_idx, end_idx = (current_page - 1) * page_size, current_page * page_size
-    
-    def format_df_display(df):
-        df_display = df.copy()
-        for col in ['mastery_pf', 'validation_avg_pf']:
-            if col in df_display: df_display[col] = df_display[col].apply(lambda x: "💯 Wins" if x >= 999 else f"{x:.2f}")
-        return df_display
-        
-    paginated_df = filtered_df.iloc[start_idx:end_idx]
-    formatted_paginated_df = format_df_display(paginated_df)
-    cols_to_show = [col for col in display_cols.keys() if col in formatted_paginated_df.columns]
-    st.dataframe(formatted_paginated_df[cols_to_show].rename(columns=display_cols).style.format({'Mastery Sharpe': '{:.2f}'}))
+    display_cols = ['strategy_id', 'mastery_pf', 'mastery_sharpe', 'validation_avg_pf', 'validation_passed', 'market_rule']
+    st.dataframe(filtered_df[display_cols].rename(columns=lambda c: c.replace('_', ' ').title()))
 
 with tab2:
-    # --- Deep-dive analysis for a single selected strategy ---
     st.header("Post-Mortem Analysis")
     if filtered_df.empty:
-        st.warning("No strategies match the current filters. Relax the filters in the sidebar to select a strategy for analysis.")
+        st.warning("No strategies match filters. Please relax filters in the sidebar.")
     else:
         strategy_id = st.selectbox("Select a Strategy for Interrogation", filtered_df['strategy_id'].unique())
         if strategy_id:
-            # Load all data related to the single selected strategy
             strategy_data = filtered_df.loc[filtered_df['strategy_id'] == strategy_id].iloc[0]
-            validation_data = detailed_df[detailed_df['strategy_id'] == strategy_id].copy()
+            validation_data = detailed_df[detailed_df['strategy_id'] == strategy_id]
             mastery_data_row = mastery_df[mastery_df['strategy_id'] == strategy_id]
             mastery_data = mastery_data_row.iloc[0] if not mastery_data_row.empty else None
 
             # --- Section 1: Strategy Profile ---
             st.subheader("1. Strategy Profile")
-            trade_type = strategy_data.get('trade_type', 'N/A').upper()
             sl_def = f"{strategy_data['sl_def']:.3f}%" if isinstance(strategy_data['sl_def'], float) else f"{strategy_data['sl_def']} (Bin {strategy_data['sl_bin'] or 'N/A'})".replace('.0', '')
             tp_def = f"{strategy_data['tp_def']:.3f}%" if isinstance(strategy_data['tp_def'], float) else f"{strategy_data['tp_def']} (Bin {strategy_data['tp_bin'] or 'N/A'})".replace('.0', '')
-            card_col1, card_col2, card_col3 = st.columns(3)
-            card_col1.metric("Trade Type", trade_type)
-            card_col2.metric("Stop-Loss Logic", sl_def)
-            card_col3.metric("Take-Profit Logic", tp_def)
+            st.metric("Trade Type", strategy_data.get('trade_type', 'N/A').upper())
+            st.text_input("Stop-Loss Logic", sl_def, disabled=True)
+            st.text_input("Take-Profit Logic", tp_def, disabled=True)
             st.code(strategy_data['market_rule'], language='sql')
             st.sidebar.markdown("---")
             st.sidebar.header("Manual Actions")
             if st.sidebar.button("🚫 Manually Blacklist this Blueprint", type="primary", key=f"bl_{strategy_id}"):
-                write_to_blacklist(strategy_data, selected_report)
+                write_to_blacklist(strategy_data['key'], selected_report)
                 st.rerun()
 
-            # --- Section 2: The Verdict (Mastery vs. Validation) ---
+            # --- Section 2: The Verdict ---
             st.subheader("2. The Verdict: Was the Edge Real?")
             v_col1, v_col2 = st.columns(2)
-            with v_col1:
-                st.markdown(f"#### Mastery Performance (on `{selected_report}`)")
-                if mastery_data is not None:
-                    pf_display = "💯 Wins" if mastery_data['profit_factor'] >= 999 else f"{mastery_data['profit_factor']:.2f}"
-                    sharpe_display = f"{min(mastery_data['sharpe_ratio'], SHARPE_CAP):.2f}" + ("+" if mastery_data['sharpe_ratio'] > SHARPE_CAP else "")
-                    st.metric("Profit Factor", pf_display)
-                    st.metric("Sharpe Ratio", sharpe_display)
-                    st.metric("Max Drawdown", f"{mastery_data['max_drawdown_pct']:.2f}%")
-                else:
-                    st.warning("Mastery data not found.")
-            with v_col2:
-                st.markdown("#### Validation Performance (Avg on Others)")
-                pf_display_val = "💯 Wins" if strategy_data['validation_avg_pf'] >= 999 else f"{strategy_data['validation_avg_pf']:.2f}"
-                sharpe_display_val = f"{strategy_data['validation_avg_sharpe']:.2f}"
-                st.metric("Avg Profit Factor", pf_display_val)
-                st.metric("Avg Sharpe Ratio", sharpe_display_val)
-                st.metric("Markets Passed", strategy_data['validation_passed'])
+            if mastery_data is not None:
+                v_col1.metric("Mastery Profit Factor", f"{mastery_data.get('profit_factor', 0):.2f}".replace(f"{PF_CAP:.2f}", "💯 Inf"))
+                v_col1.metric("Mastery Sharpe Ratio", f"{mastery_data.get('sharpe_ratio', 0):.2f}")
+            v_col2.metric("Validation Avg Profit Factor", f"{strategy_data['validation_avg_pf']:.2f}".replace(f"{PF_CAP:.2f}", "💯 Inf"))
+            v_col2.metric("Markets Passed", strategy_data['validation_passed'])
 
-            # --- Section 3: Performance Breakdown Across Markets ---
+            # --- Section 3: Performance Breakdown ---
             st.subheader("3. Evidence: Performance Breakdown")
-            metric_to_plot = st.radio("Select Metric to Compare:", ["Profit Factor", "Sharpe Ratio", "Max Drawdown %"], horizontal=True, key="metric_radio")
             metric_map = {'Profit Factor': 'profit_factor', 'Sharpe Ratio': 'sharpe_ratio', 'Max Drawdown %': 'max_drawdown_pct'}
-            selected_metric = metric_map[metric_to_plot]
-            full_perf_data = pd.concat([pd.DataFrame([mastery_data]), validation_data], ignore_index=True) if mastery_data is not None else validation_data.copy()
-            full_perf_data.replace(np.inf, np.nan, inplace=True)
-            fig_compare = px.bar(full_perf_data, x='market', y=selected_metric, color=selected_metric, title=f"<b>{metric_to_plot} Across All Tested Markets</b>", color_continuous_scale='RdYlGn' if selected_metric != 'max_drawdown_pct' else 'RdYlGn_r')
+            selected_metric = metric_map[st.radio("Select Metric to Compare:", metric_map.keys(), horizontal=True, key="metric_radio")]
+            
+            full_perf_data = pd.concat([pd.DataFrame([mastery_data]), validation_data], ignore_index=True) if mastery_data is not None else validation_data
+            
+            # VISUALIZATION FIX: Handle inf, NaN, and 0 for stable plotting.
+            full_perf_data[selected_metric] = full_perf_data[selected_metric].replace([np.inf, -np.inf], PF_CAP if 'profit' in selected_metric else SHARPE_CAP).fillna(0)
+            
+            y_range = None
+            if selected_metric == 'max_drawdown_pct':
+                y_range = [0, max(1, full_perf_data[selected_metric].max() * 1.1)] # Ensure y-axis starts at 0
+
+            fig_compare = px.bar(full_perf_data, x='market', y=selected_metric, color=selected_metric, title=f"<b>{selected_metric.replace('_',' ').title()} Across Markets</b>", color_continuous_scale='RdYlGn' if 'drawdown' not in selected_metric else 'RdYlGn_r', range_y=y_range)
             fig_compare.add_hline(y=1.0 if selected_metric == 'profit_factor' else 0.0, line_dash="dash", line_color="white")
             st.plotly_chart(fig_compare, use_container_width=True)
 
             # --- Section 4: Deep Dive into Market Regimes ---
-            regime_cols_exist = 'session_pct' in full_perf_data.columns
-            if not regime_cols_exist:
-                st.warning("Regime columns (e.g., 'session_pct') not found in detailed reports. Cannot perform deep dive analysis.")
-            else:
-                for regime_type in ['session', 'trend_regime', 'vol_regime']:
-                    st.subheader(f"4. Deep Dive: {regime_type.replace('_', ' ').title()} Performance")
-                    st.info(f"Analyze the strategy's performance within each {regime_type.replace('_regime','')} category, market by market.")
+            if 'session_pct' in full_perf_data.columns:
+                st.subheader("4. Deep Dive: Regime Performance")
+                regime_type = st.radio("Select Regime to Analyze", ['session', 'trend_regime', 'vol_regime'], horizontal=True, format_func=lambda x: x.replace('_', ' ').title())
+                
+                regime_data = []
+                for _, row in full_perf_data.iterrows():
+                    # VISUALIZATION FIX: Handle NaN/inf for color metric.
+                    pf_for_color = row['profit_factor'] if pd.notna(row['profit_factor']) else 1.0
+                    pf_for_color = min(pf_for_color, 5.0) # Cap PF for color scale
                     
-                    # Process the dictionary-like strings into a long-form DataFrame for plotting
-                    regime_data = []
-                    for _, row in full_perf_data.iterrows():
-                        regime_dict = parse_dict_col(row[f'{regime_type}_pct'])
-                        for regime, pct in regime_dict.items():
-                            regime_data.append({'market': row['market'], 'Regime': regime, 'Trade Percentage': pct, 'Profit Factor': row['profit_factor']})
-                    regime_df = pd.DataFrame(regime_data)
-                    regime_df['Profit Factor'] = regime_df['Profit Factor'].replace(np.inf, 5) # Cap for color scale
+                    for regime, pct in parse_dict_col(row[f'{regime_type}_pct']).items():
+                        regime_data.append({'market': row['market'], 'Regime': regime, 'Trade Percentage': pct, 'Profit Factor': pf_for_color})
+                regime_df = pd.DataFrame(regime_data)
 
-                    # Use a faceted bar chart to compare regimes across all markets
-                    fig = px.bar(regime_df, x='Regime', y='Trade Percentage', color='Profit Factor', color_continuous_scale='RdYlGn', range_color=[0, 2], facet_col='market', labels={'Trade Percentage': '% of Trades in this Regime'}, title=f"<b>Performance by {regime_type.replace('_', ' ').title()} in Each Market</b>")
-                    fig.update_xaxes(matches=None) # Allow x-axis labels to be different for each facet
-                    st.plotly_chart(fig, use_container_width=True)
+                fig_regime = px.bar(regime_df, x='Regime', y='Trade Percentage', color='Profit Factor', color_continuous_scale='RdYlGn', range_color=[0, 2], facet_col='market', labels={'Trade Percentage': '% of Trades'}, title=f"<b>Performance by {regime_type.replace('_', ' ').title()}</b> (Color is Overall Market PF)")
+                st.plotly_chart(fig_regime, use_container_width=True)
 
             # --- Section 5: Market Internals vs. Performance ---
             st.subheader("5. Market Internals: Did the Strategy Get Lucky?")
