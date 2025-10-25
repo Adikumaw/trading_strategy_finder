@@ -192,24 +192,24 @@ if __name__ == "__main__":
 
     if target_file_arg:
         # --- Targeted Mode ---
-        print(f"🎯 Targeted Mode: Processing single file '{target_file_arg}'")
+        print(f"[TARGET] Targeted Mode: Processing single file '{target_file_arg}'")
         combinations_path_check = os.path.join(combinations_dir, target_file_arg)
         if not os.path.exists(combinations_path_check):
-            print(f"❌ Error: Target file not found in platinum_data/combinations: {target_file_arg}")
+            print(f"[ERROR] Error: Target file not found in platinum_data/combinations: {target_file_arg}")
             files_to_process = []
         else:
             files_to_process = [target_file_arg]
     else:
         # --- Discovery Mode (Default) ---
-        print("🔍 Discovery Mode: Scanning for all new files...")
+        print("[SCAN] Discovery Mode: Scanning for all new files...")
         try:
             # Find all available combination files
             files_to_process = [f for f in os.listdir(combinations_dir) if f.endswith('.csv')]
         except FileNotFoundError:
-            print(f"❌ Directory not found: {combinations_dir}"); files_to_process = []
+            print(f"[ERROR] Directory not found: {combinations_dir}"); files_to_process = []
 
     if not files_to_process:
-        print("ℹ️ No combination files found to process.")
+        print("[INFO] No combination files found to process.")
     else:
         print(f"Found {len(files_to_process)} instrument(s) to process.")
         
@@ -232,16 +232,16 @@ if __name__ == "__main__":
 
             # --- Pre-computation Checks ---
             if not os.path.exists(combinations_path):
-                print(f"❌ Combinations file not found for {instrument_name}. Skipping."); continue
+                print(f"[ERROR] Combinations file not found for {instrument_name}. Skipping."); continue
             if not os.path.exists(gold_path):
-                print(f"❌ Gold features file not found for {instrument_name}. Skipping."); continue
+                print(f"[ERROR] Gold features file not found for {instrument_name}. Skipping."); continue
             if not os.path.exists(instrument_target_dir):
-                print(f"❌ Target files directory not found for {instrument_name}. Run extractor first."); continue
+                print(f"[ERROR] Target files directory not found for {instrument_name}. Run extractor first."); continue
             
             # --- Load Blueprints and Validate Keys ---
             all_definitions = pd.read_csv(combinations_path)
             if 'key' not in all_definitions.columns:
-                print(f"❌ FATAL ERROR: 'key' column not found in {fname}. Run the target extractor script first."); continue
+                print(f"[ERROR] FATAL ERROR: 'key' column not found in {fname}. Run the target extractor script first."); continue
 
             # --- Blacklist and State Management Logic ---
             # 1. Load the blacklist of failed blueprint KEYS. This is now highly efficient.
@@ -277,7 +277,7 @@ if __name__ == "__main__":
             definitions_to_process = definitions_to_process[~definitions_to_process['key'].isin(processed_keys)]
             
             if definitions_to_process.empty:
-                print("✅ All valid combinations have already been processed for this instrument."); continue
+                print("[SUCCESS] All valid combinations have already been processed for this instrument."); continue
             
             print(f"Found {len(definitions_to_process)} new or updated combinations to analyze.")
             
@@ -285,7 +285,7 @@ if __name__ == "__main__":
             gold_features_df = pd.read_csv(gold_path, parse_dates=['time'])
             tasks = definitions_to_process.to_dict('records')
             effective_num_processes = min(num_processes, len(tasks))
-            print(f"\n🚀 Starting discovery with {effective_num_processes} workers...")
+            print(f"\n[INFO] Starting discovery with {effective_num_processes} workers...")
 
             func = partial(process_definition_batch, gold_features_df=gold_features_df, targets_dir=instrument_target_dir)
             if effective_num_processes > 1:
@@ -314,8 +314,8 @@ if __name__ == "__main__":
                 final_df.drop_duplicates(subset=unique_cols, keep='last', inplace=True)
                 final_df.sort_values(by=['avg_trade_density', 'num_candles'], ascending=[False, False], inplace=True)
                 final_df.to_csv(discovered_path, index=False)
-                print(f"✅ Cleanup complete. Total unique strategies: {len(final_df)}")
+                print(f"[SUCCESS] Cleanup complete. Total unique strategies: {len(final_df)}")
             except FileNotFoundError:
-                print("ℹ️ No new strategies were discovered in this run.")
+                print("[INFO] No new strategies were discovered in this run.")
                 
-    print("\n" + "="*50 + "\n✅ All strategy discovery complete.")
+    print("\n" + "="*50 + "\n[SUCCESS] All strategy discovery complete.")

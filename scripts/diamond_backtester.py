@@ -250,14 +250,14 @@ if __name__ == "__main__":
 
     if target_file_arg:
         # --- Targeted Mode ---
-        print(f"🎯 Targeted Mode: Processing single file '{target_file_arg}'")
+        print(f"[TARGET] Targeted Mode: Processing single file '{target_file_arg}'")
         if not os.path.exists(os.path.join(discovered_dir, target_file_arg)):
-            print(f"❌ Error: Target file not found in platinum_data/discovered_strategy: {target_file_arg}"); sys.exit(1)
+            print(f"[ERROR] Error: Target file not found in platinum_data/discovered_strategy: {target_file_arg}"); sys.exit(1)
         strategy_file_to_test = target_file_arg
     else:
         # --- Interactive Mode ---
         strategy_files = [f for f in os.listdir(discovered_dir) if f.endswith('.csv')]
-        if not strategy_files: print("❌ No discovered strategy files found."); sys.exit(1)
+        if not strategy_files: print("[ERROR] No discovered strategy files found."); sys.exit(1)
         
         print("--- Select a Strategy File to Backtest ---")
         for i, f in enumerate(strategy_files): print(f"  [{i+1}] {f}")
@@ -266,7 +266,7 @@ if __name__ == "__main__":
             if not 0 <= choice < len(strategy_files): raise ValueError
             strategy_file_to_test = strategy_files[choice]
         except (ValueError, IndexError):
-            print("❌ Invalid selection. Exiting."); sys.exit(1)
+            print("[ERROR] Invalid selection. Exiting."); sys.exit(1)
 
     # --- Proceed with the selected file ---
     origin_market_csv = strategy_file_to_test
@@ -275,7 +275,7 @@ if __name__ == "__main__":
     discovered_path = os.path.join(discovered_dir, strategy_file_to_test)
     strategies_df_full = pd.read_csv(discovered_path, dtype={'sl_def': object, 'tp_def': object, 'key': str})
     if 'key' not in strategies_df_full.columns:
-        print(f"❌ FATAL: 'key' column not found in {strategy_file_to_test}. Please re-run the Platinum discoverer."); sys.exit(1)
+        print(f"[ERROR] FATAL: 'key' column not found in {strategy_file_to_test}. Please re-run the Platinum discoverer."); sys.exit(1)
     
     def to_numeric_or_str(x):
         try: return float(x)
@@ -365,10 +365,10 @@ if __name__ == "__main__":
             existing_zircon = pd.read_csv(zircon_input_path)
             passed_strategies_df = pd.concat([existing_zircon, passed_strategies_df]).drop_duplicates(subset=['strategy_id'])
         passed_strategies_df.to_csv(zircon_input_path, index=False)
-        print(f"\n✅ Saved/Updated {len(passed_strategies_df)} master strategies to Zircon input.")
+        print(f"\n[SUCCESS] Saved/Updated {len(passed_strategies_df)} master strategies to Zircon input.")
         
         results_df.to_csv(detailed_report_path, index=False)
-        print(f"✅ Full detailed report cleaned and saved.")
+        print(f"[SUCCESS] Full detailed report cleaned and saved.")
 
         if not failed_strategies_df.empty:
             failed_keys_df = failed_strategies_df[['key']].drop_duplicates()
@@ -377,8 +377,8 @@ if __name__ == "__main__":
                 existing_blacklist = pd.read_csv(blacklist_path)
                 failed_keys_df = pd.concat([existing_blacklist, failed_keys_df]).drop_duplicates()
             failed_keys_df.to_csv(blacklist_path, index=False)
-            print(f"✅ Added/updated {len(failed_keys_df)} underperforming blueprint keys to blacklist.")
+            print(f"[SUCCESS] Added/updated {len(failed_keys_df)} underperforming blueprint keys to blacklist.")
     except FileNotFoundError:
-        print("ℹ️ No results were generated to analyze.")
+        print("[INFO] No results were generated to analyze.")
 
-    print("\n" + "="*50 + "\n✅ Diamond Layer (Mastery) run complete.")
+    print("\n" + "="*50 + "\n[SUCCESS] Diamond Layer (Mastery) run complete.")

@@ -64,7 +64,7 @@ def get_csv_headings(file_path):
                 df = pd.read_parquet(file_path) # This might read more than just schema in some cases
                 return df.columns.tolist()
             except Exception as e:
-                print(f"❌ Error reading parquet headings with pandas fallback: {e}")
+                print(f"[ERROR] Error reading parquet headings with pandas fallback: {e}")
                 return None
 
     # --- CSV File Handling ---
@@ -76,7 +76,7 @@ def get_csv_headings(file_path):
             columns = reader._engine.names
         return columns
     except Exception as e:
-        print(f"❌ Error reading CSV headings: {e}")
+        print(f"[ERROR] Error reading CSV headings: {e}")
         return None
 
 
@@ -115,12 +115,12 @@ def show_csv_preview(file_path, num_rows=5):
         pd.set_option("display.max_colwidth", None) # Show full content of each cell
         pd.set_option("display.expand_frame_repr", False) # Prevent wrapping to multiple lines
 
-        print(f"\n✅ Showing first {num_rows} rows:\n")
+        print(f"\n[SUCCESS] Showing first {num_rows} rows:\n")
         # Use to_string() for a better formatted output than a simple print()
         print(df_preview.to_string(index=False))
 
     except Exception as e:
-        print(f"❌ Error reading preview rows: {e}")
+        print(f"[ERROR] Error reading preview rows: {e}")
 
 
 def main():
@@ -130,7 +130,7 @@ def main():
     csv_file = input(f"Enter file path (CSV or Parquet). default: {default_path}: ").strip() or default_path
 
     if not os.path.exists(csv_file):
-        print(f"❌ File '{csv_file}' not found!")
+        print(f"[ERROR] File '{csv_file}' not found!")
         return
 
     # --- User Interaction Loop ---
@@ -154,7 +154,7 @@ def main():
                 num_rows = 5
             show_csv_preview(csv_file, num_rows)
     else:
-        print("⚠️ Could not extract headings from the file.")
+        print("[WARNING] Could not extract headings from the file.")
 
 
 if __name__ == "__main__":

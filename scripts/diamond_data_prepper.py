@@ -220,10 +220,10 @@ if __name__ == "__main__":
     try:
         all_raw_files = [f for f in os.listdir(raw_dir) if f.endswith('.csv')]
     except FileNotFoundError:
-        print(f"❌ Raw data directory not found. Exiting."); sys.exit(1)
+        print(f"[ERROR] Raw data directory not found. Exiting."); sys.exit(1)
     
     if not all_raw_files:
-        print("❌ No raw data files found to process. Exiting."); sys.exit(1)
+        print("[ERROR] No raw data files found to process. Exiting."); sys.exit(1)
 
     # --- NEW: DUAL-MODE FILE DISCOVERY LOGIC ---
     target_file_arg = sys.argv[1] if len(sys.argv) > 1 else None
@@ -231,10 +231,10 @@ if __name__ == "__main__":
 
     if target_file_arg:
         # --- Targeted Mode ---
-        print(f"🎯 Targeted Mode: Preparing data for timeframe of '{target_file_arg}'")
+        print(f"[TARGET] Targeted Mode: Preparing data for timeframe of '{target_file_arg}'")
         match = re.search(r'(\d+)\.csv$', target_file_arg)
         if not match:
-            print(f"❌ Error: Could not extract timeframe from '{target_file_arg}'. Exiting.")
+            print(f"[ERROR] Error: Could not extract timeframe from '{target_file_arg}'. Exiting.")
             sys.exit(1)
         
         target_timeframe_num = match.group(1)
@@ -243,7 +243,7 @@ if __name__ == "__main__":
         print(f"Found {len(files_to_consider)} files matching the '{target_timeframe_num}m' timeframe.")
     else:
         # --- Discovery Mode (Default) ---
-        print("🔍 Discovery Mode: Scanning for all new raw files to prepare...")
+        print("[SCAN] Discovery Mode: Scanning for all new raw files to prepare...")
         files_to_consider = all_raw_files
 
     # --- Identify Markets That Need Processing ---
@@ -257,7 +257,7 @@ if __name__ == "__main__":
             markets_to_process.append(f)
     
     if not markets_to_process:
-        print("✅ All necessary market data is already prepared. Nothing to do.")
+        print("[SUCCESS] All necessary market data is already prepared. Nothing to do.")
         sys.exit(0)
 
     print(f"Found {len(markets_to_process)} new market(s) to prepare.")
@@ -269,7 +269,7 @@ if __name__ == "__main__":
     base_raw_df = robust_read_csv(os.path.join(raw_dir, markets_to_process[0]))
     base_silver_df = add_all_market_features(base_raw_df.copy()).iloc[INDICATOR_WARMUP_PERIOD:].reset_index(drop=True)
     _, scaler = create_gold_features(base_silver_df.copy())
-    print("✅ Scaler fitted.")
+    print("[SUCCESS] Scaler fitted.")
     
     # --- Main Processing Loop ---
     # Iterate through each new market and apply the full Silver -> Gold pipeline.
@@ -290,10 +290,10 @@ if __name__ == "__main__":
             # 4. Save the final data to efficient Parquet files.
             silver_df.to_parquet(output_silver_path)
             gold_df.to_parquet(output_gold_path)
-            print(f"✅ Prepared data for {market} saved.")
+            print(f"[SUCCESS] Prepared data for {market} saved.")
         except Exception as e:
-            print(f"❌ FAILED to process {market}. Error: {e}")
+            print(f"[ERROR] FAILED to process {market}. Error: {e}")
             # In a full pipeline, we might want to stop here.
             # For robustness, we'll just print the error and continue.
             
-    print("\n" + "="*50 + "\n✅ All market data preparation complete.")
+    print("\n" + "="*50 + "\n[SUCCESS] All market data preparation complete.")

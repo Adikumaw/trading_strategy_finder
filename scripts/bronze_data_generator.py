@@ -159,7 +159,7 @@ def get_config_from_filename(filename):
     # Use regex to extract the instrument name and timeframe number from the filename
     match = re.search(r'([A-Z0-9]+?)(\d+)\.csv$', filename)
     if not match:
-        print(f"⚠️ Could not determine timeframe or instrument for {filename}. Skipping.")
+        print(f"[WARNING] Could not determine timeframe or instrument for {filename}. Skipping.")
         return None, None
         
     instrument, timeframe_num = match.group(1), match.group(2)
@@ -167,10 +167,10 @@ def get_config_from_filename(filename):
     
     # Check if a preset exists for the detected timeframe
     if timeframe_key not in TIMEFRAME_PRESETS:
-        print(f"⚠️ No preset for timeframe '{timeframe_key}' in {filename}. Skipping.")
+        print(f"[WARNING] No preset for timeframe '{timeframe_key}' in {filename}. Skipping.")
         return None, None
         
-    print(f"✅ Config '{timeframe_key}' detected for {filename}.")
+    print(f"[SUCCESS] Config '{timeframe_key}' detected for {filename}.")
     
     # --- Determine Pip Size for Accurate Spread Calculation ---
     if "JPY" in instrument.upper():
@@ -217,7 +217,7 @@ def process_file(task_id, input_file, output_file, config, spread_cost):
         numeric_cols = ["open", "high", "low", "close"]
         df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric)
     except Exception as e:
-        print(f"❌ Error loading or parsing {filename}: {e}")
+        print(f"[ERROR] Error loading or parsing {filename}: {e}")
         return f"Error: {filename}"
 
     profitable_trades_accumulator = []
@@ -314,32 +314,32 @@ if __name__ == "__main__":
     # the timing of the actual first processing task.
     print("Warming up Numba JIT compiler... (this may take a moment on first run)")
     find_winning_trades_numba(np.random.rand(10), np.random.rand(10), np.random.rand(10), np.random.randint(0, 10, 10, dtype=np.int64), np.random.rand(2), np.random.rand(2), 1, 0.0001, 10)
-    print("✅ Numba is ready.")
+    print("[SUCCESS] Numba is ready.")
 
     # --- NEW: DUAL-MODE FILE DISCOVERY LOGIC ---
     target_file_arg = sys.argv[1] if len(sys.argv) > 1 else None
     
     if target_file_arg:
         # --- Targeted Mode ---
-        print(f"🎯 Targeted Mode: Processing single file '{target_file_arg}'")
+        print(f"[TARGET] Targeted Mode: Processing single file '{target_file_arg}'")
         if not os.path.exists(os.path.join(raw_data_dir, target_file_arg)):
-            print(f"❌ Error: Target file not found in raw_data directory: {target_file_arg}")
+            print(f"[ERROR] Error: Target file not found in raw_data directory: {target_file_arg}")
             raw_files = []
         else:
             raw_files = [target_file_arg]
     else:
         # --- Discovery Mode (Default) ---
-        print("🔍 Discovery Mode: Scanning for all new files...")
+        print("[SCAN] Discovery Mode: Scanning for all new files...")
         try:
             all_raw_files = [f for f in os.listdir(raw_data_dir) if f.endswith('.csv')]
             # Filter out files that have already been processed
             raw_files = [f for f in all_raw_files if not os.path.exists(os.path.join(bronze_data_dir, f))]
         except FileNotFoundError:
-            print(f"❌ Error: The directory '{raw_data_dir}' was not found.")
+            print(f"[ERROR] Error: The directory '{raw_data_dir}' was not found.")
             raw_files = []
 
     if not raw_files: 
-        print("ℹ️ No new files to process.")
+        print("[INFO] No new files to process.")
     else:
         print(f"Found {len(raw_files)} file(s) to process...")
         
@@ -362,11 +362,11 @@ if __name__ == "__main__":
                 tasks.append((task_id, input_path, output_path, config, spread_cost))
         
         if not tasks:
-            print("❌ No valid files to process.")
+            print("[ERROR] No valid files to process.")
         else:
             # --- Execute Processing ---
             effective_workers = min(num_processes, len(tasks))
-            print(f"\n🚀 Starting processing with {effective_workers} workers.")
+            print(f"\n[INFO] Starting processing with {effective_workers} workers.")
             if effective_workers > 1:
                 # Use a multiprocessing Pool to execute tasks in parallel
                 with Pool(processes=effective_workers) as pool:

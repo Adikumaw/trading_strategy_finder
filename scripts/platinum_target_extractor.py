@@ -167,16 +167,16 @@ if __name__ == "__main__":
 
     if target_file_arg:
         # --- Targeted Mode ---
-        print(f"🎯 Targeted Mode: Processing single file '{target_file_arg}'")
+        print(f"[TARGET] Targeted Mode: Processing single file '{target_file_arg}'")
         combinations_path_check = os.path.join(combinations_dir, target_file_arg)
         if not os.path.exists(combinations_path_check):
-            print(f"❌ Error: Target file not found in platinum_data/combinations: {target_file_arg}")
+            print(f"[ERROR] Error: Target file not found in platinum_data/combinations: {target_file_arg}")
             files_to_process = []
         else:
             files_to_process = [target_file_arg]
     else:
         # --- Discovery Mode (Default) ---
-        print("🔍 Discovery Mode: Scanning for all new files...")
+        print("[SCAN] Discovery Mode: Scanning for all new files...")
         try:
             combination_files = [f for f in os.listdir(combinations_dir) if f.endswith('.csv')]
             # Check which files already have the 'key' column added, indicating they are processed.
@@ -189,10 +189,10 @@ if __name__ == "__main__":
                 except Exception:
                     files_to_process.append(f) # Process if file is empty or unreadable
         except FileNotFoundError:
-            print(f"❌ Directory not found: {combinations_dir}"); files_to_process = []
+            print(f"[ERROR] Directory not found: {combinations_dir}"); files_to_process = []
 
     if not files_to_process:
-        print("ℹ️ No new combination files found to process.")
+        print("[INFO] No new combination files found to process.")
     else:
         print(f"Found {len(files_to_process)} instrument(s) to process.")
         
@@ -217,14 +217,14 @@ if __name__ == "__main__":
             instrument_target_dir = os.path.join(targets_dir, instrument_name)
 
             if not os.path.exists(instrument_chunk_dir):
-                print(f"❌ Chunks not found for {instrument_name}. Run silver_data_generator first."); continue
+                print(f"[ERROR] Chunks not found for {instrument_name}. Run silver_data_generator first."); continue
             
             # --- Prepare Definitions and Keys ---
             all_definitions = pd.read_csv(combinations_path)
             
             # This check is now inside the loop, specific to each file.
             if 'key' in all_definitions.columns:
-                print(f"✅ Keys already exist in {fname}. Targets presumed extracted. Skipping.")
+                print(f"[SUCCESS] Keys already exist in {fname}. Targets presumed extracted. Skipping.")
                 continue
 
             os.makedirs(instrument_target_dir, exist_ok=True)
@@ -247,18 +247,18 @@ if __name__ == "__main__":
 
             chunk_files = [os.path.join(instrument_chunk_dir, f) for f in os.listdir(instrument_chunk_dir) if f.endswith('.csv')]
             if not chunk_files:
-                print(f"⚠️ No chunk files found in {instrument_chunk_dir} to process. Skipping target extraction.")
+                print(f"[WARNING] No chunk files found in {instrument_chunk_dir} to process. Skipping target extraction.")
                 continue
             
             # --- Memory Optimization: Analyze dtypes ---
             print("Analyzing column types for memory-efficient loading...")
             temp_df = pd.read_csv(chunk_files[0], nrows=1)
             dtype_map = {col: 'float32' for col in temp_df.columns if col not in ['entry_time', 'exit_time', 'trade_type', 'outcome']}
-            print("✅ Column types analyzed.")
+            print("[SUCCESS] Column types analyzed.")
             
             # --- Execute Processing in Parallel ---
             effective_num_processes = min(num_processes, len(chunk_files))
-            print(f"\n🚀 Starting extraction with {effective_num_processes} worker(s)...")
+            print(f"\n[INFO] Starting extraction with {effective_num_processes} worker(s)...")
             
             func = partial(process_chunk_for_all_definitions, all_definitions=all_definitions, target_dir=instrument_target_dir, dtype_map=dtype_map)
 
@@ -275,8 +275,8 @@ if __name__ == "__main__":
             # belongs to which strategy blueprint.
             try:
                 all_definitions.to_csv(combinations_path, index=False)
-                print(f"\n✅ Target extraction complete and keys saved back to {fname}.")
+                print(f"\n[SUCCESS] Target extraction complete and keys saved back to {fname}.")
             except Exception as e:
-                print(f"\n❌ FAILED to save keys back to {fname}. Error: {e}")
+                print(f"\n[ERROR] FAILED to save keys back to {fname}. Error: {e}")
 
-    print("\n" + "="*50 + "\n✅ All target extraction complete.")
+    print("\n" + "="*50 + "\n[SUCCESS] All target extraction complete.")
