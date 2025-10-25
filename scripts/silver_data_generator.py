@@ -33,8 +33,13 @@ import numpy as np
 from tqdm import tqdm
 import sys # <-- IMPORT SYS MODULE
 import re
+import math
+import traceback
+from multiprocessing import Pool, cpu_count, Manager
 
 # --- CONFIGURATION ---
+MAX_CPU_USAGE = max(1, cpu_count() - 2)
+CHUNK_SIZE = 500_000
 # Defines the periods for various technical indicators to be calculated.
 SMA_PERIODS = [20, 50, 100, 200]
 EMA_PERIODS = [8, 13, 21, 50]
@@ -47,6 +52,34 @@ PIVOT_WINDOW = 10  # Window for calculating fractal-based Support/Resistance
 PAST_LOOKBACKS = [3, 5, 10, 20, 50] # Lookback periods for price-action features
 # The number of initial candles to discard to allow indicators to generate stable values.
 INDICATOR_WARMUP_PERIOD = 200
+
+# --- GLOBAL VARIABLES FOR WORKER INITIALIZATION ---
+# These will hold the large, read-only lookup structures in each worker process.
+worker_feature_values_np = None
+worker_time_to_idx_lookup = None
+worker_col_to_idx = None
+worker_levels_for_positioning = None
+worker_chunked_outcomes_dir = None
+
+
+def init_worker(feature_values_np, time_to_idx_lookup, col_to_idx, levels_for_positioning, chunked_outcomes_dir):
+    """
+    Initializer function for each worker process in the multiprocessing Pool.
+    
+    This function is called once per worker when the pool is spawned. It receives the
+    large, shared, read-only lookup objects and stores them in global variables
+    within that specific worker's memory space. This is a crucial optimization that
+    avoids the overhead and instability of passing large objects with every task,
+    especially on Windows.
+    """
+    global worker_feature_values_np, worker_time_to_idx_lookup, worker_col_to_idx
+    global worker_levels_for_positioning, worker_chunked_outcomes_dir
+    
+    worker_feature_values_np = feature_values_np
+    worker_time_to_idx_lookup = time_to_idx_lookup
+    worker_col_to_idx = col_to_idx
+    worker_levels_for_positioning = levels_for_positioning
+    worker_chunked_outcomes_dir = chunked_outcomes_dir
 
 # --- UTILITY & FEATURE FUNCTIONS ---
 
@@ -347,38 +380,103 @@ def add_positioning_features_lookup(bronze_chunk, feature_values_np, time_to_idx
             
     return enriched_chunk
 
+# --- ADD THIS NEW WORKER FUNCTION ---
+def queue_worker(task_queue):
+    """
+    The "Consumer" worker function, which runs in a continuous loop.
+    It takes a task from the shared queue, enriches the data, saves the result,
+    and then immediately looks for the next task.
+    """
+    # These global variables are populated by the init_worker function
+    global worker_feature_values_np, worker_time_to_idx_lookup, worker_col_to_idx
+    global worker_levels_for_positioning, worker_chunked_outcomes_dir
+    
+    total_processed_in_worker = 0
+    while True:
+        try:
+            task = task_queue.get()
+            # The "None" sentinel is the signal for the worker to shut down.
+            if task is None:
+                break
+
+            chunk_df, chunk_number = task
+            if chunk_df.empty:
+                continue
+            
+            # --- The core logic is the same as your old worker ---
+            enriched_chunk = add_positioning_features_lookup(
+                chunk_df,
+                worker_feature_values_np,
+                worker_time_to_idx_lookup,
+                worker_col_to_idx,
+                worker_levels_for_positioning
+            )
+            
+            if not enriched_chunk.empty:
+                enriched_chunk = downcast_dtypes(enriched_chunk)
+                output_path = os.path.join(worker_chunked_outcomes_dir, f"chunk_{chunk_number}.csv")
+                enriched_chunk.to_csv(output_path, index=False)
+                total_processed_in_worker += len(enriched_chunk)
+
+        except Exception as e:
+            # It's crucial to log errors that happen inside a worker process
+            print(f"WORKER ERROR processing chunk: {e}")
+            traceback.print_exc()
+
+    return total_processed_in_worker
+
+# --- WORKER FUNCTION (Corrected unpacking) ---
+def enrich_and_save_chunk(task):
+    """
+    The "Producer" worker function, executed in parallel by the Pool.
+    Receives a tuple containing the chunk DataFrame and its number, enriches the
+    data, and saves it to a uniquely named file.
+    """
+    # The task tuple is now correctly structured as (DataFrame, number)
+    chunk_df, chunk_number = task
+    
+    if chunk_df.empty:
+        return 0
+        
+    global worker_feature_values_np, worker_time_to_idx_lookup, worker_col_to_idx
+    global worker_levels_for_positioning, worker_chunked_outcomes_dir
+
+    try:
+        enriched_chunk = add_positioning_features_lookup(
+            chunk_df, # Use the correctly unpacked DataFrame
+            worker_feature_values_np,
+            worker_time_to_idx_lookup,
+            worker_col_to_idx,
+            worker_levels_for_positioning
+        )
+        
+        if not enriched_chunk.empty:
+            enriched_chunk = downcast_dtypes(enriched_chunk)
+            chunk_output_path = os.path.join(worker_chunked_outcomes_dir, f"chunk_{chunk_number}.csv")
+            enriched_chunk.to_csv(chunk_output_path, index=False)
+            return len(enriched_chunk)
+    except Exception as e:
+        print(f"[ERROR] Failed to process chunk {chunk_number}. Error: {e}")
+    
+    return 0
+
+# --- REPLACE THE OLD create_silver_data WITH THIS NEW VERSION ---
 def create_silver_data(bronze_path, raw_path, features_path, chunked_outcomes_dir):
     """
-    Orchestrates the entire Silver Layer data generation process for a single instrument.
-
-    This function manages the two main stages of the Silver Layer:
-    1.  It first calls the feature engineering functions to generate and save a
-        comprehensive market features file based on the raw OHLC data.
-    2.  It then prepares the highly efficient lookup structures from this feature
-        file.
-    3.  Finally, it iterates through the massive Bronze trades file in memory-safe
-        chunks, enriching each chunk with relational positioning features and
-        saving the result to a dedicated instrument-specific directory.
-
-    Args:
-        bronze_path (str): Full path to the input Bronze trades CSV file.
-        raw_path (str): Full path to the corresponding raw OHLC data file.
-        features_path (str): Full path where the Silver market features file should be saved.
-        chunked_outcomes_dir (str): Path to the directory where the enriched trade
-                                    chunks should be saved.
+    Orchestrates Silver Layer generation using a memory-safe Producer-Consumer Queue
+    for parallel chunk enrichment.
     """
     print(f"\n{'='*25}\nProcessing: {os.path.basename(raw_path)}\n{'='*25}")
 
-    # --- STEP 1: Create and Save the Full Silver Market Features Dataset ---
+    # --- STEP 1: Create Silver Features (This part is unchanged) ---
     print("STEP 1: Creating Silver Features dataset...")
     raw_df = robust_read_csv(raw_path)
     if len(raw_df) < INDICATOR_WARMUP_PERIOD + 1:
         print(f"[ERROR] SKIPPING: Not enough data for indicator warmup."); return
 
     features_df = add_all_market_features(raw_df)
-    del raw_df; gc.collect() # Free up memory
+    del raw_df; gc.collect()
     
-    # Remove the initial warmup period rows where indicators are unreliable
     features_df = features_df.iloc[INDICATOR_WARMUP_PERIOD:].reset_index(drop=True)
     features_df = downcast_dtypes(features_df)
     
@@ -386,78 +484,96 @@ def create_silver_data(bronze_path, raw_path, features_path, chunked_outcomes_di
     features_df.to_csv(features_path, index=False)
     print(f"[SUCCESS] Silver Features saved to: {features_path}")
     
-    # --- STEP 2: Create Enriched and Chunked Trade Outcomes ---
-    print("\nSTEP 2: Creating ENRICHED and CHUNKED Silver Outcomes...")
+    # --- STEP 2: Prepare for Parallel Enrichment ---
+    print("\nSTEP 2: Preparing for PARALLEL chunk enrichment...")
+    if os.path.exists(chunked_outcomes_dir):
+        import shutil
+        shutil.rmtree(chunked_outcomes_dir)
     os.makedirs(chunked_outcomes_dir, exist_ok=True)
     
-    # Read the massive bronze file in chunks to manage memory usage
-    bronze_iterator = pd.read_csv(bronze_path, chunksize=500_000, parse_dates=['entry_time'])
-    
-    # Pre-computation: Build the highly efficient lookup structures ONCE before the main loop.
+    # --- 2a. Build Lookup Structures (This part is unchanged) ---
     print("Creating feature lookup structure for fast processing...")
-
-    # Define ALL columns we might need from the features.csv file
     all_possible_cols = ['time', 'open', 'high', 'low', 'close', 'support', 'resistance',
                     'BB_upper', 'BB_lower', 'ATR_level_up_1x', 'ATR_level_down_1x']
-
     temp_df_cols = pd.read_csv(features_path, nrows=0).columns
-    # --- MODIFIED LINE: Use a more specific regex ---
-    # This now only matches columns that START with SMA_ or EMA_, avoiding the ratio columns.
     sma_ema_pattern = re.compile(r'^(SMA_|EMA_)')
     all_possible_cols.extend([col for col in temp_df_cols if sma_ema_pattern.match(col)])
-
-    # Read only the necessary columns into a temporary DataFrame
     features_df_for_lookup = pd.read_csv(features_path, parse_dates=['time'], usecols=list(set(all_possible_cols)))
-
-    # 1. Define the columns that will go into the NumPy array. THIS MUST INCLUDE 'close'.
+    
     cols_for_numpy = [c for c in features_df_for_lookup.columns if c != 'time']
-
-    # 2. Create the full lookup structures. `col_to_idx` will map 'close' to its index.
     feature_values_np, time_to_idx_lookup, col_to_idx = create_feature_lookup(features_df_for_lookup, cols_for_numpy)
-
-    # 3. Define the list of level names FOR THE LOOP. This list explicitly EXCLUDES 'close'.
     levels_for_positioning = [c for c in cols_for_numpy if c != 'close']
-
-    # Clean up memory
-    del features_df_for_lookup, temp_df_cols
-    gc.collect()
+    
+    del features_df_for_lookup, temp_df_cols; gc.collect()
     print("[SUCCESS] Lookup structure created.")
 
-    chunk_counter = 1
-    for chunk in tqdm(bronze_iterator, desc="  Enriching Bronze Chunks"):
-        if chunk.empty: continue
+    # --- STEP 3: Execute Parallel Enrichment with a Queue ---
+    
+    # Define chunk size and calculate total chunks for the progress bar
+    try:
+        num_rows = sum(1 for row in open(bronze_path, 'r')) - 1 # Subtract 1 for header
+    except FileNotFoundError:
+        print(f"[ERROR] Bronze file not found at {bronze_path}. Cannot proceed.")
+        return
         
-        # Pass the bronze chunk and the lookup structures to the enrichment function
-        enriched_chunk = add_positioning_features_lookup(chunk, feature_values_np, time_to_idx_lookup, col_to_idx, levels_for_positioning)
+    if num_rows <= 0:
+        print("[INFO] Bronze file is empty or has only a header. No trades to process.")
+        return
         
-        if not enriched_chunk.empty:
-            enriched_chunk = downcast_dtypes(enriched_chunk)
-            chunk_output_path = os.path.join(chunked_outcomes_dir, f"chunk_{chunk_counter}.csv")
-            enriched_chunk.to_csv(chunk_output_path, index=False)
-            chunk_counter += 1
+    num_chunks = math.ceil(num_rows / CHUNK_SIZE)
+    print(f"Found {num_rows} trades, which will be processed in {num_chunks} chunks.")
+    
+    # Use a Manager to create a queue that can be shared between processes
+    manager = Manager()
+    # The maxsize is a safety valve to prevent the queue from consuming too much RAM
+    task_queue = manager.Queue(maxsize=MAX_CPU_USAGE * 2)
+
+    # Arguments to be passed once to each worker upon initialization
+    pool_init_args = (feature_values_np, time_to_idx_lookup, col_to_idx, levels_for_positioning, chunked_outcomes_dir)
+    
+    with Pool(processes=MAX_CPU_USAGE, initializer=init_worker, initargs=pool_init_args) as pool:
+        # Start the worker processes. They will immediately block on queue.get(), waiting for tasks.
+        worker_results = [pool.apply_async(queue_worker, (task_queue,)) for _ in range(MAX_CPU_USAGE)]
+
+        # The main process now acts as the PRODUCER, reading the file and feeding the queue.
+        # This loop runs concurrently with the workers.
+        bronze_iterator = pd.read_csv(bronze_path, chunksize=CHUNK_SIZE, parse_dates=['entry_time'])
+        for i, chunk_df in enumerate(tqdm(bronze_iterator, total=num_chunks, desc="Feeding Chunks to Workers"), 1):
+            task_queue.put((chunk_df, i))
+
+        # After the producer is done, it sends a "None" sentinel to each worker.
+        # This tells them there are no more tasks and they can shut down.
+        for _ in range(MAX_CPU_USAGE):
+            task_queue.put(None)
+
+        # Wait for all workers to finish and collect their return values (total processed counts)
+        total_trades_processed = sum(res.get() for res in worker_results)
             
-    print(f"[SUCCESS] Enriched and chunked Silver Outcomes saved to: {chunked_outcomes_dir}")
+    print(f"[SUCCESS] Enriched and chunked {total_trades_processed} trades to: {chunked_outcomes_dir}")
 
 if __name__ == "__main__":
     """
-    Main execution block.
-    
-    This script can be run in two modes:
-    1. Discovery Mode (no arguments): Scans for all new bronze files and processes them.
-       Example: `python scripts/silver_data_generator.py`
-       
-    2. Targeted Mode (one argument): Processes only the single file specified.
-       Example: `python scripts/silver_data_generator.py XAUUSD15.csv`
+    Main execution block for the Silver Layer.
+
+    Supports two operational modes:
+    1. Targeted Mode: Processes a single file specified via a command-line argument.
+       - Usage: `python scripts/silver_data_generator.py XAUUSD15.csv`
+
+    2. Interactive Mode: If run without arguments, scans for all unprocessed bronze
+       files and presents an interactive menu for the user to select which file(s)
+       to process. Selected files are processed sequentially.
+       - Usage: `python scripts/silver_data_generator.py`
     """
     core_dir = os.path.dirname(os.path.abspath(__file__))
-    raw_dir, bronze_dir = [os.path.abspath(os.path.join(core_dir, d)) for d in ['../raw_data', '../bronze_data']]
-    features_dir = os.path.abspath(os.path.join(core_dir, '../silver_data/features'))
-    chunked_outcomes_dir = os.path.abspath(os.path.join(core_dir, '../silver_data/chunked_outcomes'))
+    raw_dir = os.path.abspath(os.path.join(core_dir, '..', 'raw_data'))
+    bronze_dir = os.path.abspath(os.path.join(core_dir, '..', 'bronze_data'))
+    features_dir = os.path.abspath(os.path.join(core_dir, '..', 'silver_data', 'features'))
+    chunked_outcomes_dir = os.path.abspath(os.path.join(core_dir, '..', 'silver_data', 'chunked_outcomes'))
     
     os.makedirs(features_dir, exist_ok=True)
     os.makedirs(chunked_outcomes_dir, exist_ok=True)
 
-    # --- NEW: DUAL-MODE FILE DISCOVERY LOGIC ---
+    files_to_process = []
     target_file_arg = sys.argv[1] if len(sys.argv) > 1 else None
 
     if target_file_arg:
@@ -465,39 +581,51 @@ if __name__ == "__main__":
         print(f"[TARGET] Targeted Mode: Processing single file '{target_file_arg}'")
         bronze_path_check = os.path.join(bronze_dir, target_file_arg)
         if not os.path.exists(bronze_path_check):
-            print(f"[ERROR] Error: Target file not found in bronze_data directory: {target_file_arg}")
-            files_to_process = []
+            print(f"[ERROR] Target file not found in bronze_data directory: {target_file_arg}")
         else:
             files_to_process = [target_file_arg]
     else:
-        # --- Discovery Mode (Default) ---
-        print("[SCAN] Discovery Mode: Scanning for all new files...")
+        # --- Interactive Mode ---
+        print("[SCAN] Interactive Mode: Scanning for all new files...")
         try:
-            # Find all available bronze files
-            bronze_files = [f for f in os.listdir(bronze_dir) if f.endswith('.csv')]
-            
-            # Check which ones already have a corresponding silver 'chunked_outcomes' directory
-            files_to_process = []
+            bronze_files = sorted([f for f in os.listdir(bronze_dir) if f.endswith('.csv')])
+            new_files = []
             for f in bronze_files:
                 instrument_name = f.replace('.csv', '')
                 instrument_chunked_dir = os.path.join(chunked_outcomes_dir, instrument_name)
                 if not os.path.exists(instrument_chunked_dir):
-                    files_to_process.append(f)
+                    new_files.append(f)
+            
+            if not new_files:
+                print("[INFO] No new Bronze files to process.")
+            else:
+                print("\n--- Select File(s) to Process ---")
+                for i, f in enumerate(new_files):
+                    print(f"  [{i+1}] {f}")
+                print("\nYou can select multiple files by entering numbers separated by commas (e.g., 1,3,5)")
+                
+                user_input = input("Enter number(s) to process: ").strip()
+                if user_input:
+                    try:
+                        selected_indices = [int(i.strip()) - 1 for i in user_input.split(',')]
+                        valid_indices = sorted(list(set(idx for idx in selected_indices if 0 <= idx < len(new_files))))
+                        files_to_process = [new_files[idx] for idx in valid_indices]
+                    except ValueError:
+                        print("[ERROR] Invalid input. Please enter numbers separated by commas.")
         except FileNotFoundError:
-            print(f"[ERROR] Error: The directory '{bronze_dir}' was not found.")
-            files_to_process = []
+            print(f"[ERROR] The directory '{bronze_dir}' was not found.")
 
     if not files_to_process:
-        print("[INFO] No new files to process.")
+        print("[INFO] No files selected or found for processing.")
     else:
-        print(f"Found {len(files_to_process)} file(s) to process...")
-        # --- Main Loop: Iterate through each instrument ---
+        print(f"\n[INFO] Queued {len(files_to_process)} file(s) for processing: {files_to_process}")
+        
+        # --- Main Execution Loop (Processes files serially) ---
         for fname in files_to_process:
             instrument_name = fname.replace('.csv', '')
             bronze_path = os.path.join(bronze_dir, fname)
             raw_path = os.path.join(raw_dir, fname)
             features_path = os.path.join(features_dir, fname)
-            # The output directory for chunks is specific to each instrument
             instrument_chunked_outcomes_dir = os.path.join(chunked_outcomes_dir, instrument_name)
             
             # --- Pre-computation Checks ---
