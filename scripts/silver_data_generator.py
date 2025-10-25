@@ -32,6 +32,7 @@ import numba
 import numpy as np
 from tqdm import tqdm
 import sys # <-- IMPORT SYS MODULE
+import re
 
 # --- CONFIGURATION ---
 # Defines the periods for various technical indicators to be calculated.
@@ -221,8 +222,8 @@ def add_all_market_features(df):
         price_action_df[f'bullish_ratio_last_{n}'] = is_bullish.rolling(n).mean()
         price_action_df[f'avg_body_last_{n}'] = body_size.rolling(n).mean()
         price_action_df[f'avg_range_last_{n}'] = (df['high'] - df['low']).rolling(n).mean()
-        sma_col = f'SMA_{n}' if f'SMA_{n}' in indicator_df else 'SMA_20'
-        price_action_df[f'close_{sma_col}_ratio'] = df['close'] / indicator_df[sma_col]
+        # --- THE PROBLEMATIC LINES HAVE BEEN REMOVED FROM HERE ---
+
     # Market regime classification
     price_action_df['trend_regime'] = np.where(indicator_df['ADX'] > 25, 'trend', 'range')
     if f'ATR_{ATR_PERIOD}' in indicator_df:
@@ -329,7 +330,7 @@ def add_positioning_features_lookup(bronze_chunk, feature_values_np, time_to_idx
 
     for level_name in levels_for_positioning:
         level_idx = col_to_idx[level_name]
-        
+
         # Get the entire column of level prices for the chunk from our NumPy array
         level_price = features_for_chunk_np[:, level_idx]
         
@@ -400,12 +401,13 @@ def create_silver_data(bronze_path, raw_path, features_path, chunked_outcomes_di
                     'BB_upper', 'BB_lower', 'ATR_level_up_1x', 'ATR_level_down_1x']
 
     temp_df_cols = pd.read_csv(features_path, nrows=0).columns
-    all_possible_cols.extend([col for col in temp_df_cols if 'SMA_' in col or 'EMA_' in col])
+    # --- MODIFIED LINE: Use a more specific regex ---
+    # This now only matches columns that START with SMA_ or EMA_, avoiding the ratio columns.
+    sma_ema_pattern = re.compile(r'^(SMA_|EMA_)')
+    all_possible_cols.extend([col for col in temp_df_cols if sma_ema_pattern.match(col)])
 
     # Read only the necessary columns into a temporary DataFrame
     features_df_for_lookup = pd.read_csv(features_path, parse_dates=['time'], usecols=list(set(all_possible_cols)))
-
-    # --- THE DEFINITIVE FIX ---
 
     # 1. Define the columns that will go into the NumPy array. THIS MUST INCLUDE 'close'.
     cols_for_numpy = [c for c in features_df_for_lookup.columns if c != 'time']
