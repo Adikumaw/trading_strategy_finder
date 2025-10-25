@@ -222,44 +222,46 @@ def get_config_from_filename(filename):
     
     return TIMEFRAME_PRESETS[timeframe_key], spread_cost
 
+# --- WORKER FUNCTION (WITH THE CRITICAL FIX) ---
 def process_chunk_task(task_indices):
     """
     The "Producer" worker function, executed in parallel by the Pool.
     
-    This function receives only the start and end indices for its assigned chunk of
-    work. It accesses the large, shared DataFrame and configuration from its own
-    process-global variables (set by `init_worker`). It then slices the DataFrame,
-    converts the slice to NumPy arrays, and calls the high-speed Numba function.
-
-    Args:
-        task_indices (tuple): A tuple containing the (start_index, end_index) of the
-                              data slice this worker is responsible for.
-
-    Returns:
-        list: The list of profitable trades found within its assigned chunk.
+    It receives the start and end indices for its assigned data slice. It accesses the
+    large, shared DataFrame via a process-global variable, calculates the correct
+    processing limit for its chunk (handling the final, shorter chunk), and then
+    calls the high-speed Numba simulation.
     """
     start_index, end_index = task_indices
     
-    # Access the shared read-only data from this worker's global scope.
     global worker_df, worker_config, worker_spread_cost, worker_max_lookforward
     
-    # Create the specific data slice this worker needs to operate on.
+    # Create the overlapping data slice this worker needs.
     df_slice = worker_df.iloc[start_index:end_index]
 
+    # --- THE CRITICAL FIX IS HERE ---
+    # The processing limit must be calculated dynamically to handle the final chunk,
+    # which may be shorter than INPUT_CHUNK_SIZE. It's the smaller of the chunk size
+    # or the number of candles remaining in the *entire* dataframe from this chunk's start.
+    processing_limit = min(INPUT_CHUNK_SIZE, len(worker_df) - start_index)
+    
+    # We must also ensure our processing_limit isn't larger than the non-overlapping
+    # part of the slice we've been given. This is a safety check.
+    processing_limit = min(processing_limit, len(df_slice) - worker_max_lookforward)
+    if processing_limit <= 0:
+        return [] # This chunk is too small to process (it's all lookahead data).
+
+    # Convert the slice to NumPy arrays for Numba.
     close = df_slice["close"].values.astype(np.float64)
     high = df_slice["high"].values.astype(np.float64)
     low = df_slice["low"].values.astype(np.float64)
     timestamps = df_slice["time"].values.astype('datetime64[ns]').astype(np.int64)
     sl_ratios = worker_config["SL_RATIOS"].astype(np.float64)
     tp_ratios = worker_config["TP_RATIOS"].astype(np.float64)
-
-    # The actual number of candles to process is the original chunk size,
-    # not the full slice length which includes the lookahead overlap.
-    processing_limit = INPUT_CHUNK_SIZE
     
     return find_winning_trades_numba(
         close, high, low, timestamps, sl_ratios, tp_ratios, worker_max_lookforward, worker_spread_cost,
-        processing_limit
+        processing_limit  # Pass the correctly calculated, dynamic limit.
     )
 
 # --- MAIN PROCESSING ORCHESTRATOR ---
