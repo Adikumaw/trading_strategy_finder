@@ -160,9 +160,9 @@ def process_file_in_parallel(file_path_tuple):
         features_df = pd.read_csv(silver_path, parse_dates=['time'])
         gold_dataset = create_gold_features(features_df)
         gold_dataset.to_csv(gold_path, index=False)
-        return f"✅ Success! Gold data generated for {fname}."
+        return f"[SUCCESS] Success! Gold data generated for {fname}."
     except Exception as e:
-        return f"❌ FAILED to process {fname}. Error: {e}"
+        return f"[ERROR] FAILED to process {fname}. Error: {e}"
 
 if __name__ == "__main__":
     """
@@ -186,27 +186,27 @@ if __name__ == "__main__":
 
     if target_file_arg:
         # --- Targeted Mode ---
-        print(f"🎯 Targeted Mode: Processing single file '{target_file_arg}'")
+        print(f"[TARGET] Targeted Mode: Processing single file '{target_file_arg}'")
         silver_path_check = os.path.join(silver_features_dir, target_file_arg)
         if not os.path.exists(silver_path_check):
-            print(f"❌ Error: Target file not found in silver_data/features directory: {target_file_arg}")
+            print(f"[ERROR] Error: Target file not found in silver_data/features directory: {target_file_arg}")
             files_to_process = []
         else:
             files_to_process = [target_file_arg]
     else:
         # --- Discovery Mode (Default) ---
-        print("🔍 Discovery Mode: Scanning for all new files...")
+        print("[SCAN] Discovery Mode: Scanning for all new files...")
         try:
             # Find all available silver files
             all_files = [f for f in os.listdir(silver_features_dir) if f.endswith('.csv')]
             # Check which files already have a corresponding Gold output to make the script resumable.
             files_to_process = [f for f in all_files if not os.path.exists(os.path.join(gold_features_dir, f))]
         except FileNotFoundError:
-            print(f"❌ Error: Directory not found: '{silver_features_dir}'.")
+            print(f"[ERROR] Error: Directory not found: '{silver_features_dir}'.")
             files_to_process = []
 
     if not files_to_process:
-        print("ℹ️ No new files to process.")
+        print("[INFO] No new files to process.")
     else:
         print(f"Found {len(files_to_process)} new silver feature file(s) to process.")
         
@@ -227,7 +227,7 @@ if __name__ == "__main__":
         
         # --- Execute Processing ---
         effective_num_processes = min(num_processes, len(tasks))
-        print(f"\n🚀 Starting processing with {effective_num_processes} worker(s)...")
+        print(f"\n[INFO] Starting processing with {effective_num_processes} worker(s)...")
         
         if effective_num_processes > 1:
             with Pool(processes=effective_num_processes) as pool:
@@ -240,4 +240,4 @@ if __name__ == "__main__":
         for res in results:
             print(res)
 
-    print("\n" + "="*50 + "\n✅ All gold data generation complete.")
+    print("\n" + "="*50 + "\n[SUCCESS] All gold data generation complete.")

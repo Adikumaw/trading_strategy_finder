@@ -266,18 +266,18 @@ if __name__ == "__main__":
 
     if target_file_arg:
         # --- Targeted Mode ---
-        print(f"🎯 Targeted Mode: Processing single file '{target_file_arg}'")
+        print(f"[TARGET] Targeted Mode: Processing single file '{target_file_arg}'")
         # The orchestrator will pass the full filename, not just the instrument name.
         # We need to prepend the expected prefix to find the file.
         expected_filename = f"master_strategies_{target_file_arg}"
         if not os.path.exists(os.path.join(zircon_input_dir, expected_filename)):
-            print(f"❌ Error: Target file not found in zircon_data/input: {expected_filename}"); sys.exit(1)
+            print(f"[ERROR] Error: Target file not found in zircon_data/input: {expected_filename}"); sys.exit(1)
         file_to_validate = expected_filename
         use_multiprocessing = True # Default to True for automated runs
     else:
         # --- Interactive Mode ---
         master_strategy_files = [f for f in os.listdir(zircon_input_dir) if f.startswith('master_strategies_') and f.endswith('.csv')]
-        if not master_strategy_files: print("❌ No master strategy files found."); sys.exit(1)
+        if not master_strategy_files: print("[ERROR] No master strategy files found."); sys.exit(1)
         
         print("--- Select a Master Strategy File to Validate ---")
         for i, f in enumerate(master_strategy_files): print(f"  [{i+1}] {f}")
@@ -286,19 +286,19 @@ if __name__ == "__main__":
             if not 0 <= choice < len(master_strategy_files): raise ValueError
             file_to_validate = master_strategy_files[choice]
         except (ValueError, IndexError):
-            print("❌ Invalid selection. Exiting."); sys.exit(1)
+            print("[ERROR] Invalid selection. Exiting."); sys.exit(1)
         use_multiprocessing = input("Use multiprocessing? (y/n): ").strip().lower() == 'y'
 
     # --- Proceed with the selected file ---
     match = re.search(r'master_strategies_(.+?(\d+))\.csv', file_to_validate)
-    if not match: print(f"❌ Invalid filename format for '{file_to_validate}'."); sys.exit(1)
+    if not match: print(f"[ERROR] Invalid filename format for '{file_to_validate}'."); sys.exit(1)
     
     origin_market_name_full, origin_timeframe_num = match.group(1), match.group(2)
     
     # --- Load Strategies and Prepare for Testing ---
     strategies_df = pd.read_csv(os.path.join(zircon_input_dir, file_to_validate))
     if 'trade_type' not in strategies_df.columns:
-        print("❌ 'trade_type' column not found in master strategies file. Please re-run the Diamond layer."); sys.exit(1)
+        print("[ERROR] 'trade_type' column not found in master strategies file. Please re-run the Diamond layer."); sys.exit(1)
     
     def to_numeric_or_str(x):
         try: return float(x)
@@ -311,9 +311,9 @@ if __name__ == "__main__":
     all_prepared_markets = sorted([f.replace('_silver.parquet', '.csv') for f in os.listdir(prepared_data_dir) if f.endswith('_silver.parquet')])
     markets_to_test = [m for m in all_prepared_markets if m.endswith(f"{origin_timeframe_num}.csv")]
 
-    print(f"\n✅ Found {len(strategies_df)} master strategies from {origin_market_name_full}.csv.")
-    if not markets_to_test: print(f"⚠️ No prepared markets found for timeframe '{origin_timeframe_num}m'."); sys.exit(1)
-    print(f"✅ Will generate reports and logs for {len(markets_to_test)} markets: {markets_to_test}")
+    print(f"\n[SUCCESS] Found {len(strategies_df)} master strategies from {origin_market_name_full}.csv.")
+    if not markets_to_test: print(f"[WARNING] No prepared markets found for timeframe '{origin_timeframe_num}m'."); sys.exit(1)
+    print(f"[SUCCESS] Will generate reports and logs for {len(markets_to_test)} markets: {markets_to_test}")
     
     # --- Resumability & Execution Logic (remains the same) ---
     detailed_report_path = os.path.join(zircon_results_dir, f"detailed_report_{origin_market_name_full}.csv")
@@ -327,7 +327,7 @@ if __name__ == "__main__":
         print(f"\nStarting new reporting run for {len(markets_to_process)} markets.")
 
     if not markets_to_process:
-        print("✅ All markets have already been processed for this strategy set.")
+        print("[SUCCESS] All markets have already been processed for this strategy set.")
     else:
         num_processes = MAX_CPU_USAGE if use_multiprocessing else 1
         strategy_list = strategies_df.to_dict('records')
@@ -356,7 +356,7 @@ if __name__ == "__main__":
                     df = pd.DataFrame(market_results)
                     file_exists = os.path.exists(detailed_report_path) and os.path.getsize(detailed_report_path) > 0
                     df.to_csv(detailed_report_path, mode='a', header=not file_exists, index=False)
-                    print(f"✅ Appended {len(df)} results for {market_csv}.")
+                    print(f"[SUCCESS] Appended {len(df)} results for {market_csv}.")
                 
                 log_file.write(market_csv + '\n')
                 log_file.flush()
@@ -390,9 +390,9 @@ if __name__ == "__main__":
         summary_report_path = os.path.join(zircon_results_dir, f"summary_report_{origin_market_name_full}.csv")
         summary_df.to_csv(summary_report_path, index=False)
         detailed_df.to_csv(detailed_report_path, index=False)
-        print(f"✅ Final reports generated for '{origin_market_name_full}'.")
+        print(f"[SUCCESS] Final reports generated for '{origin_market_name_full}'.")
 
     except FileNotFoundError:
-        print("ℹ️ No detailed results found to generate a summary from.")
+        print("[INFO] No detailed results found to generate a summary from.")
     
-    print("\n" + "="*50 + "\n✅ Zircon Layer (Validation) run complete.")
+    print("\n" + "="*50 + "\n[SUCCESS] Zircon Layer (Validation) run complete.")

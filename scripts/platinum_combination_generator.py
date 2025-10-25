@@ -66,10 +66,10 @@ def generate_strategy_definitions(chunked_outcomes_dir):
     try:
         chunk_files = [os.path.join(chunked_outcomes_dir, f) for f in os.listdir(chunked_outcomes_dir) if f.endswith('.csv')]
         if not chunk_files:
-            print("❌ No chunk files found in the directory.")
+            print("[ERROR] No chunk files found in the directory.")
             return pd.DataFrame()
     except FileNotFoundError:
-        print(f"❌ Chunk directory not found: {chunked_outcomes_dir}")
+        print(f"[ERROR] Chunk directory not found: {chunked_outcomes_dir}")
         return pd.DataFrame()
 
     # --- Step 1: Discover all potential placement levels efficiently ---
@@ -181,7 +181,7 @@ def generate_strategy_definitions(chunked_outcomes_dir):
 
 
     if not definitions:
-        print("\nℹ️ No valid combinations were found.")
+        print("\n[INFO] No valid combinations were found.")
         return pd.DataFrame()
 
     # Perform a final de-duplication and reset the index for a clean output file
@@ -210,16 +210,16 @@ if __name__ == "__main__":
     if target_file_arg:
         # --- Targeted Mode ---
         instrument_name = target_file_arg.replace('.csv', '')
-        print(f"🎯 Targeted Mode: Processing single instrument folder '{instrument_name}'")
+        print(f"[TARGET] Targeted Mode: Processing single instrument folder '{instrument_name}'")
         instrument_chunk_dir_check = os.path.join(chunked_outcomes_parent_dir, instrument_name)
         if not os.path.isdir(instrument_chunk_dir_check):
-            print(f"❌ Error: Target instrument folder not found in silver_data/chunked_outcomes: {instrument_name}")
+            print(f"[ERROR] Error: Target instrument folder not found in silver_data/chunked_outcomes: {instrument_name}")
             instrument_folders_to_process = []
         else:
             instrument_folders_to_process = [instrument_name]
     else:
         # --- Discovery Mode (Default) ---
-        print("🔍 Discovery Mode: Scanning for all new instrument folders...")
+        print("[SCAN] Discovery Mode: Scanning for all new instrument folders...")
         try:
             all_instrument_folders = [d for d in os.listdir(chunked_outcomes_parent_dir) if os.path.isdir(os.path.join(chunked_outcomes_parent_dir, d))]
             # Check which folders already have a corresponding combinations file
@@ -229,11 +229,11 @@ if __name__ == "__main__":
                 if not os.path.exists(definitions_path_check):
                     instrument_folders_to_process.append(inst_name)
         except FileNotFoundError:
-            print(f"❌ Source directory not found: {chunked_outcomes_parent_dir}")
+            print(f"[ERROR] Source directory not found: {chunked_outcomes_parent_dir}")
             instrument_folders_to_process = []
 
     if not instrument_folders_to_process:
-        print("ℹ️ No new instrument folders found to process.")
+        print("[INFO] No new instrument folders found to process.")
     else:
         print(f"Found {len(instrument_folders_to_process)} instrument folder(s) to process...")
         # --- Main Loop: Process each instrument folder ---
@@ -249,13 +249,13 @@ if __name__ == "__main__":
 
                 if not strategy_definitions.empty:
                     strategy_definitions.to_csv(definitions_path, index=False)
-                    print(f"\n✅ Success! Saved {len(strategy_definitions)} combinations to: {definitions_path}")
+                    print(f"\n[SUCCESS] Success! Saved {len(strategy_definitions)} combinations to: {definitions_path}")
                 else:
-                    print(f"\nℹ️ No valid combinations were found for {instrument_name}.")
+                    print(f"\n[INFO] No valid combinations were found for {instrument_name}.")
 
             except Exception as e:
-                print(f"\n❌ FAILED to process {instrument_name}. Error: {e}")
+                print(f"\n[ERROR] FAILED to process {instrument_name}. Error: {e}")
                 import traceback
                 traceback.print_exc()
 
-    print("\n" + "="*50 + "\n✅ All combination generation complete.")
+    print("\n" + "="*50 + "\n[SUCCESS] All combination generation complete.")
