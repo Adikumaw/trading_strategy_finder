@@ -278,6 +278,9 @@ def add_positioning_features_lookup(bronze_chunk, feature_values_np, time_to_idx
     levels (e.g., SMAs, Bollinger Bands, S/R). It performs these calculations using
     highly optimized, vectorized NumPy operations, leveraging the pre-computed
     lookup structures for extreme efficiency.
+    
+    This version uses a direct lookup, discarding any trades that occurred during
+    the indicator warmup period to ensure the highest data quality for the ML model.
 
     Args:
         bronze_chunk (pd.DataFrame): A chunk of data from the Bronze trades file.
@@ -288,31 +291,35 @@ def add_positioning_features_lookup(bronze_chunk, feature_values_np, time_to_idx
     Returns:
         pd.DataFrame: The enriched DataFrame chunk with new relational positioning features.
     """
-    # Find the row indices in the features array for each trade's entry time.
-    # `reindex` with `method='ffill'` is a powerful way to perform a fast,
-    # point-in-time correct (backward-looking) lookup.
-    indices = time_to_idx_lookup.reindex(bronze_chunk['entry_time'], method='ffill').values
+    # --- MODIFIED LINE ---
+    # Perform a direct lookup. This will produce NaN for any entry_time not found
+    # in the lookup, which correctly includes all trades from the warmup period.
+    # this line will create the indices array with NaNs for warmup trades and valid indices for others
+    # indices is the index of the feature_values_np array corresponding to each entry_time
+    indices = time_to_idx_lookup.reindex(bronze_chunk['entry_time']).values
     
-    # Handle trades that might occur before the first feature timestamp, which result in NaN
+    # This block now handles the crucial task of discarding trades from the warmup period.
     valid_mask = ~np.isnan(indices)
     if not valid_mask.all():
         bronze_chunk = bronze_chunk.loc[valid_mask]
         indices = indices[valid_mask].astype(int)
         if bronze_chunk.empty:
             return pd.DataFrame()
+            
     indices = indices.astype(int)
 
     # Directly pull all required feature rows from the main NumPy array in one go.
-    # This is extremely fast and memory-efficient.
     features_for_chunk_np = feature_values_np[indices]
 
     enriched_chunk = bronze_chunk.copy()
     
     # Extract trade and feature data into NumPy arrays for maximum speed
-    entry = enriched_chunk['entry_price'].values
-    sl = enriched_chunk['sl_price'].values
-    tp = enriched_chunk['tp_price'].values
-    close_at_entry = features_for_chunk_np[:, col_to_idx['close']]
+    sl_prices = enriched_chunk['sl_price'].values
+    tp_prices = enriched_chunk['tp_price'].values
+    # --- YOUR LOGIC IMPLEMENTED ---
+    # This is the definitive price from the candle that triggered the signal.
+    # It will be used as the base for ALL strategy-based calculations.
+    candle_close_price = features_for_chunk_np[:, col_to_idx['close']]
 
     def safe_divide(numerator, denominator):
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -325,13 +332,13 @@ def add_positioning_features_lookup(bronze_chunk, feature_values_np, time_to_idx
         level_price = features_for_chunk_np[:, level_idx]
         
         # --- Feature Calculation 1: Distance in Basis Points ---
-        enriched_chunk[f'sl_dist_to_{level_name}_bps'] = safe_divide((sl - level_price), close_at_entry) * 10000
-        enriched_chunk[f'tp_dist_to_{level_name}_bps'] = safe_divide((tp - level_price), close_at_entry) * 10000
+        enriched_chunk[f'sl_dist_to_{level_name}_bps'] = safe_divide((sl_prices - level_price), candle_close_price) * 10000
+        enriched_chunk[f'tp_dist_to_{level_name}_bps'] = safe_divide((tp_prices - level_price), candle_close_price) * 10000
 
         # --- Feature Calculation 2: Placement as a Percentage ---
-        total_dist_to_level = level_price - entry
-        sl_dist_from_entry = sl - entry
-        tp_dist_from_entry = tp - entry
+        total_dist_to_level = level_price - candle_close_price
+        sl_dist_from_entry = sl_prices - candle_close_price
+        tp_dist_from_entry = tp_prices - candle_close_price
         enriched_chunk[f'sl_placement_pct_to_{level_name}'] = safe_divide(sl_dist_from_entry, total_dist_to_level)
         enriched_chunk[f'tp_placement_pct_to_{level_name}'] = safe_divide(tp_dist_from_entry, total_dist_to_level)
             
@@ -363,7 +370,7 @@ def create_silver_data(bronze_path, raw_path, features_path, chunked_outcomes_di
     print("STEP 1: Creating Silver Features dataset...")
     raw_df = robust_read_csv(raw_path)
     if len(raw_df) < INDICATOR_WARMUP_PERIOD + 1:
-        print(f"❌ SKIPPING: Not enough data for indicator warmup."); return
+        print(f"[ERROR] SKIPPING: Not enough data for indicator warmup."); return
 
     features_df = add_all_market_features(raw_df)
     del raw_df; gc.collect() # Free up memory
@@ -374,7 +381,7 @@ def create_silver_data(bronze_path, raw_path, features_path, chunked_outcomes_di
     
     os.makedirs(os.path.dirname(features_path), exist_ok=True)
     features_df.to_csv(features_path, index=False)
-    print(f"✅ Silver Features saved to: {features_path}")
+    print(f"[SUCCESS] Silver Features saved to: {features_path}")
     
     # --- STEP 2: Create Enriched and Chunked Trade Outcomes ---
     print("\nSTEP 2: Creating ENRICHED and CHUNKED Silver Outcomes...")
@@ -400,7 +407,7 @@ def create_silver_data(bronze_path, raw_path, features_path, chunked_outcomes_di
     
     feature_values_np, time_to_idx_lookup, col_to_idx = create_feature_lookup(features_df_for_lookup, level_cols_for_numpy)
     del features_df_for_lookup, temp_df_cols; gc.collect()
-    print("✅ Lookup structure created.")
+    print("[SUCCESS] Lookup structure created.")
 
     chunk_counter = 1
     for chunk in tqdm(bronze_iterator, desc="  Enriching Bronze Chunks"):
@@ -415,7 +422,7 @@ def create_silver_data(bronze_path, raw_path, features_path, chunked_outcomes_di
             enriched_chunk.to_csv(chunk_output_path, index=False)
             chunk_counter += 1
             
-    print(f"✅ Enriched and chunked Silver Outcomes saved to: {chunked_outcomes_dir}")
+    print(f"[SUCCESS] Enriched and chunked Silver Outcomes saved to: {chunked_outcomes_dir}")
 
 if __name__ == "__main__":
     """
@@ -441,16 +448,16 @@ if __name__ == "__main__":
 
     if target_file_arg:
         # --- Targeted Mode ---
-        print(f"🎯 Targeted Mode: Processing single file '{target_file_arg}'")
+        print(f"[TARGET] Targeted Mode: Processing single file '{target_file_arg}'")
         bronze_path_check = os.path.join(bronze_dir, target_file_arg)
         if not os.path.exists(bronze_path_check):
-            print(f"❌ Error: Target file not found in bronze_data directory: {target_file_arg}")
+            print(f"[ERROR] Error: Target file not found in bronze_data directory: {target_file_arg}")
             files_to_process = []
         else:
             files_to_process = [target_file_arg]
     else:
         # --- Discovery Mode (Default) ---
-        print("🔍 Discovery Mode: Scanning for all new files...")
+        print("[SCAN] Discovery Mode: Scanning for all new files...")
         try:
             # Find all available bronze files
             bronze_files = [f for f in os.listdir(bronze_dir) if f.endswith('.csv')]
@@ -463,11 +470,11 @@ if __name__ == "__main__":
                 if not os.path.exists(instrument_chunked_dir):
                     files_to_process.append(f)
         except FileNotFoundError:
-            print(f"❌ Error: The directory '{bronze_dir}' was not found.")
+            print(f"[ERROR] Error: The directory '{bronze_dir}' was not found.")
             files_to_process = []
 
     if not files_to_process:
-        print("ℹ️ No new files to process.")
+        print("[INFO] No new files to process.")
     else:
         print(f"Found {len(files_to_process)} file(s) to process...")
         # --- Main Loop: Iterate through each instrument ---
@@ -481,17 +488,17 @@ if __name__ == "__main__":
             
             # --- Pre-computation Checks ---
             if not os.path.exists(raw_path):
-                print(f"⚠️ SKIPPING {fname}: Corresponding raw file not found."); continue
+                print(f"[WARNING] SKIPPING {fname}: Corresponding raw file not found."); continue
             
             if not os.path.exists(bronze_path):
-                print(f"⚠️ SKIPPING {fname}: Corresponding bronze file not found."); continue
+                print(f"[WARNING] SKIPPING {fname}: Corresponding bronze file not found."); continue
             
             # --- Execute Processing ---
             try:
                 create_silver_data(bronze_path, raw_path, features_path, instrument_chunked_outcomes_dir)
             except Exception as e:
-                print(f"❌ FAILED to process {fname}. Error: {e}")
+                print(f"[ERROR] FAILED to process {fname}. Error: {e}")
                 import traceback
                 traceback.print_exc()
 
-    print("\n" + "="*50 + "\n✅ All silver data generation complete.")
+    print("\n" + "="*50 + "\n[SUCCESS] All silver data generation complete.")
