@@ -1,4 +1,4 @@
-# bronze_data_generator.py (V4 - No Post-Processing Delay)
+# bronze_data_generator.py (V11 - Final Architecture)
 
 """
 Bronze Layer: The Possibility Engine
@@ -12,6 +12,10 @@ This "universe of possibilities" forms the bedrock upon which all subsequent
 analysis is built. It operates by performing a brute-force simulation for every
 candle, testing thousands of Stop-Loss (SL) and Take-Profit (TP) combinations
 and recording only those that would have resulted in a win.
+
+This version uses a sophisticated intra-file parallelism model (Producer-Consumer)
+with a worker initializer for maximum speed, memory safety, ordered output,
+and cross-platform stability (especially on Windows).
 """
 
 import os
@@ -22,7 +26,7 @@ from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 import time
 from numba import njit
-import sys # <-- IMPORT SYS MODULE
+import sys
 
 # --- GLOBAL CONFIGURATION ---
 
@@ -36,7 +40,7 @@ OUTPUT_CHUNK_SIZE = 1_000_000
 
 # The number of candles from the input file to process in each batch passed
 # to the Numba JIT-compiled function. This is a performance tuning parameter.
-INPUT_CHUNK_SIZE = 10000
+INPUT_CHUNK_SIZE = 7000
 
 # --- SPREAD CONFIGURATION (in Pips) ---
 
@@ -62,6 +66,33 @@ TIMEFRAME_PRESETS = {
     "60m": {"SL_RATIOS": np.arange(0.005, 0.0505, 0.001), "TP_RATIOS": np.arange(0.005, 0.1005, 0.001), "MAX_LOOKFORWARD": 600},
     "240m": {"SL_RATIOS": np.arange(0.010, 0.1005, 0.001), "TP_RATIOS": np.arange(0.010, 0.2005, 0.001), "MAX_LOOKFORWARD": 800}
 }
+
+
+# --- GLOBAL VARIABLES FOR WORKER INITIALIZATION ---
+# These variables will be populated in each worker process upon creation.
+# This is a robust pattern that avoids passing large objects through inter-process
+# communication, which is slow and can be unstable on Windows.
+worker_df = None
+worker_config = None
+worker_spread_cost = None
+worker_max_lookforward = None
+
+def init_worker(df, config, spread_cost, max_lookforward):
+    """
+    Initializer function for each worker process in the multiprocessing Pool.
+    
+    This function is called once per worker when the pool is spawned. It receives the
+    large, shared, read-only data objects (like the main DataFrame) and stores them
+    in global variables within that specific worker's memory space. This prevents
+    the need to pickle and transfer this large data for every single task,
+    improving performance and stability.
+    """
+    global worker_df, worker_config, worker_spread_cost, worker_max_lookforward
+    worker_df = df
+    worker_config = config
+    worker_spread_cost = spread_cost
+    worker_max_lookforward = max_lookforward
+
 
 # --- Numba-Accelerated Core Logic ---
 
@@ -136,6 +167,8 @@ def find_winning_trades_numba(
                         
     return all_profitable_trades
 
+
+# --- HELPER & WORKER FUNCTIONS ---
 def get_config_from_filename(filename):
     """
     Parses a filename to extract the instrument and timeframe, then retrieves the correct preset.
@@ -189,196 +222,206 @@ def get_config_from_filename(filename):
     
     return TIMEFRAME_PRESETS[timeframe_key], spread_cost
 
-def process_file(task_id, input_file, output_file, config, spread_cost):
+def process_chunk_task(task_indices):
     """
-    Orchestrates the entire data generation process for a single input file.
-
-    It reads the raw data, processes it in memory-safe chunks, calls the
-    high-speed Numba function for each chunk, and saves the results to a
-    CSV file intermittently to keep memory usage low.
+    The "Producer" worker function, executed in parallel by the Pool.
+    
+    This function receives only the start and end indices for its assigned chunk of
+    work. It accesses the large, shared DataFrame and configuration from its own
+    process-global variables (set by `init_worker`). It then slices the DataFrame,
+    converts the slice to NumPy arrays, and calls the high-speed Numba function.
 
     Args:
-        task_id (int): The ID of the worker process, used for positioning the progress bar.
-        input_file (str): The full path to the raw input CSV file.
-        output_file (str): The full path where the Bronze data should be saved.
-        config (dict): The configuration dictionary from TIMEFRAME_PRESETS.
-        spread_cost (float): The calculated spread cost for this instrument.
+        task_indices (tuple): A tuple containing the (start_index, end_index) of the
+                              data slice this worker is responsible for.
 
     Returns:
-        str: A status message indicating success or failure and the number of trades found.
+        list: The list of profitable trades found within its assigned chunk.
+    """
+    start_index, end_index = task_indices
+    
+    # Access the shared read-only data from this worker's global scope.
+    global worker_df, worker_config, worker_spread_cost, worker_max_lookforward
+    
+    # Create the specific data slice this worker needs to operate on.
+    df_slice = worker_df.iloc[start_index:end_index]
+
+    close = df_slice["close"].values.astype(np.float64)
+    high = df_slice["high"].values.astype(np.float64)
+    low = df_slice["low"].values.astype(np.float64)
+    timestamps = df_slice["time"].values.astype('datetime64[ns]').astype(np.int64)
+    sl_ratios = worker_config["SL_RATIOS"].astype(np.float64)
+    tp_ratios = worker_config["TP_RATIOS"].astype(np.float64)
+
+    # The actual number of candles to process is the original chunk size,
+    # not the full slice length which includes the lookahead overlap.
+    processing_limit = INPUT_CHUNK_SIZE
+    
+    return find_winning_trades_numba(
+        close, high, low, timestamps, sl_ratios, tp_ratios, worker_max_lookforward, worker_spread_cost,
+        processing_limit
+    )
+
+# --- MAIN PROCESSING ORCHESTRATOR ---
+def process_file_pipelined(input_file, output_file, config, spread_cost):
+    """
+    Orchestrates data generation for a single file using a pipelined, ordered,
+    producer-consumer model for maximum speed, memory safety, and stability.
+
+    This function acts as the "Manager" and "Consumer." It loads the data, prepares
+    a list of tasks (chunk indices), and then creates a Pool of "Producer" workers.
+    It uses the `pool.imap()` method to ensure that while workers process chunks in
+    parallel, the results are consumed sequentially in the correct chronological order.
+    This guarantees both high CPU utilization and an ordered output file, while the
+    single consumer loop prevents memory overloads.
+
+    Args:
+        input_file (str): Full path to the raw input CSV.
+        output_file (str): Full path where the Bronze data should be saved.
+        config (dict): Configuration dictionary from TIMEFRAME_PRESETS.
+        spread_cost (float): The calculated spread cost.
+
+    Returns:
+        str: A status message indicating success or failure.
     """
     filename = os.path.basename(input_file)
+    print(f"\n[INFO] Starting pipelined processing for {filename}...")
     try:
-        # Load the raw data file, handling potential delimiter issues
         df = pd.read_csv(input_file, sep=None, engine="python", header=None)
-        # Assign standard column names
         df.columns = ["time", "open", "high", "low", "close", "volume"][:df.shape[1]]
         df["time"] = pd.to_datetime(df["time"])
-        numeric_cols = ["open", "high", "low", "close"]
-        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric)
+        df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].apply(pd.to_numeric)
     except Exception as e:
-        print(f"[ERROR] Error loading or parsing {filename}: {e}")
-        return f"Error: {filename}"
+        return f"[ERROR] Failed to load or parse {filename}: {e}"
 
-    profitable_trades_accumulator = []
-    total_trades_found = 0
-    # Ensure a clean start by removing any previous output file
     if os.path.exists(output_file):
         os.remove(output_file)
-    is_first_chunk = True
 
     max_lookforward = config["MAX_LOOKFORWARD"]
     
-    # --- Main Processing Loop: Iterate through the input dataframe in chunks ---
-    for i in tqdm(range(0, len(df), INPUT_CHUNK_SIZE), desc=f"Processing {filename}", position=task_id, leave=True):
+    # 1. Prepare tasks (now just start/end indices)
+    tasks = []
+    for i in range(0, len(df), INPUT_CHUNK_SIZE):
         start_index = i
-        end_index = i + INPUT_CHUNK_SIZE
+        end_index = i + INPUT_CHUNK_SIZE + max_lookforward
+        if start_index < len(df):
+             tasks.append((start_index, end_index))
+
+    if not tasks:
+        return "[INFO] No processable chunks found."
+
+    profitable_trades_accumulator = []
+    total_trades_found = 0
+    is_first_write = True
+    
+    # 2. Define arguments for the worker initializer
+    pool_init_args = (df, config, spread_cost, max_lookforward)
+    
+    # 3. Create the Pool, passing the initializer and its arguments
+    with Pool(processes=MAX_CPU_USAGE, initializer=init_worker, initargs=pool_init_args) as pool:
         
-        # Create an OVERLAPPING slice to provide lookahead data for the Numba function.
-        # This ensures the simulation for the last candle in the main chunk has enough
-        # future data to check against.
-        overlap_end_index = end_index + max_lookforward
-        df_slice_with_overlap = df.iloc[start_index:overlap_end_index]
+        # 4. Use imap() for ordered results
+        results_iterator = pool.imap(process_chunk_task, tasks)
         
-        # Convert the chunk's data to NumPy arrays for Numba compatibility and speed
-        close = df_slice_with_overlap["close"].values.astype(np.float64)
-        high = df_slice_with_overlap["high"].values.astype(np.float64)
-        low = df_slice_with_overlap["low"].values.astype(np.float64)
-        timestamps = df_slice_with_overlap["time"].values.astype('datetime64[ns]').astype(np.int64)
-        sl_ratios = config["SL_RATIOS"].astype(np.float64)
-        tp_ratios = config["TP_RATIOS"].astype(np.float64)
-
-        # Execute the high-performance Numba function on the prepared data chunk
-        results_list = find_winning_trades_numba(
-            close, high, low, timestamps, sl_ratios, tp_ratios, max_lookforward, spread_cost,
-            # Tell Numba how many candles to actually process (the non-overlap part)
-            processing_limit=len(df.iloc[start_index:end_index])
-        )
-
-        if results_list:
-            profitable_trades_accumulator.extend(results_list)
-
-        # --- Memory-Safe Output: Save results to disk when accumulator is full ---
-        if len(profitable_trades_accumulator) >= OUTPUT_CHUNK_SIZE:
-            # Convert the raw list of tuples into a formatted pandas DataFrame
-            chunk_df = pd.DataFrame(profitable_trades_accumulator, columns=["entry_time", "trade_type", "entry_price", "sl_price", "tp_price", "sl_ratio", "tp_ratio", "exit_time"])
-            chunk_df['entry_time'] = pd.to_datetime(chunk_df['entry_time'], unit='ns')
-            chunk_df['exit_time'] = pd.to_datetime(chunk_df['exit_time'], unit='ns')
-            chunk_df['trade_type'] = chunk_df['trade_type'].map({1: 'buy', -1: 'sell'})
-            chunk_df['outcome'] = 'win'
+        # 5. Consume results sequentially in the main process
+        for results_list in tqdm(results_iterator, total=len(tasks), desc=f"Simulating Chunks for {filename}"):
+            if results_list:
+                profitable_trades_accumulator.extend(results_list)
             
-            # Append the chunk to the output CSV file
-            chunk_df.to_csv(output_file, mode='a', header=is_first_chunk, index=False)
-            total_trades_found += len(chunk_df)
-            profitable_trades_accumulator.clear() # Clear memory
-            is_first_chunk = False # Subsequent chunks will not write a header
+            # 6. Memory-safe write to disk
+            if len(profitable_trades_accumulator) >= OUTPUT_CHUNK_SIZE:
+                chunk_df = pd.DataFrame(profitable_trades_accumulator, columns=["entry_time", "trade_type", "entry_price", "sl_price", "tp_price", "sl_ratio", "tp_ratio", "exit_time"])
+                chunk_df['entry_time'] = pd.to_datetime(chunk_df['entry_time'], unit='ns')
+                chunk_df['exit_time'] = pd.to_datetime(chunk_df['exit_time'], unit='ns')
+                chunk_df['trade_type'] = chunk_df['trade_type'].map({1: 'buy', -1: 'sell'})
+                chunk_df['outcome'] = 'win'
+                
+                chunk_df.to_csv(output_file, mode='a', header=is_first_write, index=False)
+                total_trades_found += len(chunk_df)
+                profitable_trades_accumulator.clear()
+                is_first_write = False
 
-    # --- Final Save: Save any remaining trades after the main loop finishes ---
+    # Final save for any remaining trades
     if profitable_trades_accumulator:
         final_chunk_df = pd.DataFrame(profitable_trades_accumulator, columns=["entry_time", "trade_type", "entry_price", "sl_price", "tp_price", "sl_ratio", "tp_ratio", "exit_time"])
         final_chunk_df['entry_time'] = pd.to_datetime(final_chunk_df['entry_time'], unit='ns')
         final_chunk_df['exit_time'] = pd.to_datetime(final_chunk_df['exit_time'], unit='ns')
         final_chunk_df['trade_type'] = final_chunk_df['trade_type'].map({1: 'buy', -1: 'sell'})
         final_chunk_df['outcome'] = 'win'
-        
-        final_chunk_df.to_csv(output_file, mode='a', header=is_first_chunk, index=False)
+        final_chunk_df.to_csv(output_file, mode='a', header=is_first_write, index=False)
         total_trades_found += len(final_chunk_df)
 
     if total_trades_found == 0:
         return f"No trades found for {filename}."
-
     return f"SUCCESS: {total_trades_found} trades found in {filename}."
 
+
 if __name__ == "__main__":
-    """
-    Main execution block.
-    
-    This script can be run in two modes:
-    1. Discovery Mode (no arguments): Scans the `raw_data` directory and processes all new files.
-       Example: `python scripts/bronze_data_generator.py`
-       
-    2. Targeted Mode (one argument): Processes only the single file specified on the command line.
-       Example: `python scripts/bronze_data_generator.py XAUUSD15.csv`
-    """
     start_time = time.time()
     
-    # --- Define Project Directory Structure ---
     core_dir = os.path.dirname(os.path.abspath(__file__))
     raw_data_dir = os.path.abspath(os.path.join(core_dir, '..', 'raw_data'))
     bronze_data_dir = os.path.abspath(os.path.join(core_dir, '..', 'bronze_data'))
     os.makedirs(bronze_data_dir, exist_ok=True)
     
-    # --- Numba JIT Warm-up ---
-    # The first time a Numba function is called, it needs to compile.
-    # We run it once with dummy data so the compilation delay doesn't affect
-    # the timing of the actual first processing task.
-    print("Warming up Numba JIT compiler... (this may take a moment on first run)")
+    print("Warming up Numba JIT compiler...")
     find_winning_trades_numba(np.random.rand(10), np.random.rand(10), np.random.rand(10), np.random.randint(0, 10, 10, dtype=np.int64), np.random.rand(2), np.random.rand(2), 1, 0.0001, 10)
     print("[SUCCESS] Numba is ready.")
 
-    # --- NEW: DUAL-MODE FILE DISCOVERY LOGIC ---
+    files_to_process = []
     target_file_arg = sys.argv[1] if len(sys.argv) > 1 else None
     
     if target_file_arg:
-        # --- Targeted Mode ---
+        # Targeted Mode for the orchestrator
         print(f"[TARGET] Targeted Mode: Processing single file '{target_file_arg}'")
         if not os.path.exists(os.path.join(raw_data_dir, target_file_arg)):
-            print(f"[ERROR] Error: Target file not found in raw_data directory: {target_file_arg}")
-            raw_files = []
+            print(f"[ERROR] Target file not found in raw_data directory: {target_file_arg}")
         else:
-            raw_files = [target_file_arg]
+            files_to_process = [target_file_arg]
     else:
-        # --- Discovery Mode (Default) ---
-        print("[SCAN] Discovery Mode: Scanning for all new files...")
+        # Interactive Mode for manual runs
+        print("[SCAN] Interactive Mode: Scanning for all new files...")
         try:
-            all_raw_files = [f for f in os.listdir(raw_data_dir) if f.endswith('.csv')]
-            # Filter out files that have already been processed
-            raw_files = [f for f in all_raw_files if not os.path.exists(os.path.join(bronze_data_dir, f))]
-        except FileNotFoundError:
-            print(f"[ERROR] Error: The directory '{raw_data_dir}' was not found.")
-            raw_files = []
-
-    if not raw_files: 
-        print("[INFO] No new files to process.")
-    else:
-        print(f"Found {len(raw_files)} file(s) to process...")
-        
-        # --- Configure Multiprocessing ---
-        # If in targeted mode, don't ask, just use multiprocessing.
-        if target_file_arg:
-            use_multiprocessing = True
-        else:
-            use_multiprocessing = input("Use multiprocessing? (y/n): ").strip().lower() == 'y'
+            all_raw_files = sorted([f for f in os.listdir(raw_data_dir) if f.endswith('.csv')])
+            new_files = [f for f in all_raw_files if not os.path.exists(os.path.join(bronze_data_dir, f))]
             
-        num_processes = MAX_CPU_USAGE if use_multiprocessing else 1
+            if not new_files:
+                print("[INFO] No new files to process.")
+            else:
+                print("\n--- Select File(s) to Process ---")
+                for i, f in enumerate(new_files):
+                    print(f"  [{i+1}] {f}")
+                print("\nYou can select multiple files by entering numbers separated by commas (e.g., 1,3,5)")
+                
+                user_input = input("Enter number(s) to process: ").strip()
+                if user_input:
+                    try:
+                        selected_indices = [int(i.strip()) - 1 for i in user_input.split(',')]
+                        valid_indices = sorted(list(set(idx for idx in selected_indices if 0 <= idx < len(new_files))))
+                        files_to_process = [new_files[idx] for idx in valid_indices]
+                    except ValueError:
+                        print("[ERROR] Invalid input. Please enter numbers separated by commas.")
+        except FileNotFoundError:
+            print(f"[ERROR] The directory '{raw_data_dir}' was not found.")
+
+    if not files_to_process:
+        print("[INFO] No files selected or found for processing.")
+    else:
+        print(f"\n[INFO] Queued {len(files_to_process)} file(s) for processing: {files_to_process}")
         
-        # --- Prepare Processing Tasks ---
-        tasks = []
-        for task_id, filename in enumerate(raw_files):
+        # Main Execution Loop: Processes selected files serially (one after another) for stability.
+        for filename in files_to_process:
             config, spread_cost = get_config_from_filename(filename)
             if config:
                 input_path = os.path.join(raw_data_dir, filename)
                 output_path = os.path.join(bronze_data_dir, filename)
-                tasks.append((task_id, input_path, output_path, config, spread_cost))
-        
-        if not tasks:
-            print("[ERROR] No valid files to process.")
-        else:
-            # --- Execute Processing ---
-            effective_workers = min(num_processes, len(tasks))
-            print(f"\n[INFO] Starting processing with {effective_workers} workers.")
-            if effective_workers > 1:
-                # Use a multiprocessing Pool to execute tasks in parallel
-                with Pool(processes=effective_workers) as pool:
-                    results = pool.starmap(process_file, tasks)
+                
+                result = process_file_pipelined(input_path, output_path, config, spread_cost)
+                
+                print("\n" + "="*50 + f"\nSummary for {filename}:")
+                print(result)
             else:
-                # Execute tasks sequentially in the main process
-                results = [process_file(*task) for task in tasks]
-
-            # --- Display Summary ---
-            print("\n" + "="*50 + "\nProcessing Summary:")
-            for res in results:
-                print(res)
+                print(f"[ERROR] Could not generate configuration for {filename}. Skipping.")
 
     end_time = time.time()
     print(f"\nBronze data generation complete. Total time: {end_time - start_time:.2f} seconds.")
