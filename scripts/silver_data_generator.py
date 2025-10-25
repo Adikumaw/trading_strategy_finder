@@ -269,7 +269,7 @@ def create_feature_lookup(features_df, level_cols):
     
     return feature_values_np, time_to_idx_lookup, col_to_idx
 
-def add_positioning_features_lookup(bronze_chunk, feature_values_np, time_to_idx_lookup, col_to_idx):
+def add_positioning_features_lookup(bronze_chunk, feature_values_np, time_to_idx_lookup, col_to_idx, levels_for_positioning):
     """
     Enriches a chunk of Bronze data with relational features using the fast lookup structures.
 
@@ -327,7 +327,9 @@ def add_positioning_features_lookup(bronze_chunk, feature_values_np, time_to_idx
         result[denominator == 0] = np.nan
         return result
 
-    for level_name, level_idx in col_to_idx.items():
+    for level_name in levels_for_positioning:
+        level_idx = col_to_idx[level_name]
+        
         # Get the entire column of level prices for the chunk from our NumPy array
         level_price = features_for_chunk_np[:, level_idx]
         
@@ -392,21 +394,31 @@ def create_silver_data(bronze_path, raw_path, features_path, chunked_outcomes_di
     
     # Pre-computation: Build the highly efficient lookup structures ONCE before the main loop.
     print("Creating feature lookup structure for fast processing...")
-    # It's better to read the saved, clean `features.csv` to ensure consistency.
-    # We only read the columns we absolutely need for the lookup.
-    all_level_cols = ['time', 'open', 'high', 'low', 'close', 'support', 'resistance',
-                      'BB_upper', 'BB_lower', 'ATR_level_up_1x', 'ATR_level_down_1x']
-    # Dynamically find SMA/EMA columns as they might vary
+
+    # Define ALL columns we might need from the features.csv file
+    all_possible_cols = ['time', 'open', 'high', 'low', 'close', 'support', 'resistance',
+                    'BB_upper', 'BB_lower', 'ATR_level_up_1x', 'ATR_level_down_1x']
+
     temp_df_cols = pd.read_csv(features_path, nrows=0).columns
-    all_level_cols.extend([col for col in temp_df_cols if 'SMA_' in col or 'EMA_' in col])
-    
-    features_df_for_lookup = pd.read_csv(features_path, parse_dates=['time'], usecols=all_level_cols)
-    
-    # Define the columns that will be part of the NumPy array
-    level_cols_for_numpy = [c for c in all_level_cols if c != 'time']
-    
-    feature_values_np, time_to_idx_lookup, col_to_idx = create_feature_lookup(features_df_for_lookup, level_cols_for_numpy)
-    del features_df_for_lookup, temp_df_cols; gc.collect()
+    all_possible_cols.extend([col for col in temp_df_cols if 'SMA_' in col or 'EMA_' in col])
+
+    # Read only the necessary columns into a temporary DataFrame
+    features_df_for_lookup = pd.read_csv(features_path, parse_dates=['time'], usecols=list(set(all_possible_cols)))
+
+    # --- THE DEFINITIVE FIX ---
+
+    # 1. Define the columns that will go into the NumPy array. THIS MUST INCLUDE 'close'.
+    cols_for_numpy = [c for c in features_df_for_lookup.columns if c != 'time']
+
+    # 2. Create the full lookup structures. `col_to_idx` will map 'close' to its index.
+    feature_values_np, time_to_idx_lookup, col_to_idx = create_feature_lookup(features_df_for_lookup, cols_for_numpy)
+
+    # 3. Define the list of level names FOR THE LOOP. This list explicitly EXCLUDES 'close'.
+    levels_for_positioning = [c for c in cols_for_numpy if c != 'close']
+
+    # Clean up memory
+    del features_df_for_lookup, temp_df_cols
+    gc.collect()
     print("[SUCCESS] Lookup structure created.")
 
     chunk_counter = 1
@@ -414,7 +426,7 @@ def create_silver_data(bronze_path, raw_path, features_path, chunked_outcomes_di
         if chunk.empty: continue
         
         # Pass the bronze chunk and the lookup structures to the enrichment function
-        enriched_chunk = add_positioning_features_lookup(chunk, feature_values_np, time_to_idx_lookup, col_to_idx)
+        enriched_chunk = add_positioning_features_lookup(chunk, feature_values_np, time_to_idx_lookup, col_to_idx, levels_for_positioning)
         
         if not enriched_chunk.empty:
             enriched_chunk = downcast_dtypes(enriched_chunk)
