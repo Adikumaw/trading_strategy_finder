@@ -1,4 +1,4 @@
-# 🚀 The Pipeline Orchestrator (`orchestrator.py`)
+# [INFO] The Pipeline Orchestrator (`orchestrator.py`)
 
 This script is the master controller for the entire Strategy Finder project. It provides a simple, powerful interface to run the complete, end-to-end data processing and strategy discovery pipeline for a single instrument with just one command.
 
@@ -24,7 +24,7 @@ The script follows a simple but robust sequence of operations:
 5.  **Error Handling:** If any script in the sequence fails (i.e., exits with an error), the orchestrator immediately halts the entire pipeline and reports which stage failed. This prevents the system from continuing with incomplete or corrupt data.
 6.  **Completion:** If all stages complete successfully, it prints a final success message and reminds the user of the command to launch the analysis dashboard.
 
-## 🚀 How to Use
+## [INFO] How to Use
 
 The script is designed to be run from the **root directory** of your project.
 
