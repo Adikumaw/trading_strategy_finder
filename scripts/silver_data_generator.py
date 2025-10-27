@@ -483,7 +483,7 @@ def add_positioning_features(
     return bronze_chunk
 
 
-def queue_worker(task_queue: Manager.Queue) -> int:
+def queue_worker(task_queue) -> int:
     """
     The 'Consumer' worker function, which runs in a continuous loop.
 
