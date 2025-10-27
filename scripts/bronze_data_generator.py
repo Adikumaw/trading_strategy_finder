@@ -53,7 +53,7 @@ OUTPUT_CHUNK_SIZE: int = 500_000
 
 # The number of candles from the input file to process in each batch. This is a
 # key performance-tuning parameter for the simulation.
-INPUT_CHUNK_SIZE: int = 10_000
+INPUT_CHUNK_SIZE: int = 5_000
 
 
 # --- SPREAD CONFIGURATION ---
