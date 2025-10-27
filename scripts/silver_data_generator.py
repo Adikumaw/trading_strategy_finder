@@ -469,16 +469,16 @@ def add_positioning_features(
         
         # Feature 1: Distance in Basis Points (bps).
         # Calculates how far SL/TP is from the level, normalized by entry price.
-        bronze_chunk[f'sl_dist_{level_name}_bps'] = safe_divide(sl_prices - level_price, candle_close_price) * 10000
-        bronze_chunk[f'tp_dist_{level_name}_bps'] = safe_divide(tp_prices - level_price, candle_close_price) * 10000
+        bronze_chunk[f'sl_dist_to_{level_name}_bps'] = safe_divide(sl_prices - level_price, candle_close_price) * 10000
+        bronze_chunk[f'tp_dist_to_{level_name}_bps'] = safe_divide(tp_prices - level_price, candle_close_price) * 10000
 
         # Feature 2: Placement as a Percentage.
         # Calculates where SL/TP is placed on a scale from entry (0%) to the level (100%).
         total_dist_to_level = level_price - candle_close_price
         sl_dist_from_entry = sl_prices - candle_close_price
         tp_dist_from_entry = tp_prices - candle_close_price
-        bronze_chunk[f'sl_place_{level_name}_pct'] = safe_divide(sl_dist_from_entry, total_dist_to_level)
-        bronze_chunk[f'tp_place_{level_name}_pct'] = safe_divide(tp_dist_from_entry, total_dist_to_level)
+        bronze_chunk[f'sl_place_pct_{level_name}'] = safe_divide(sl_dist_from_entry, total_dist_to_level)
+        bronze_chunk[f'tp_place_pct_{level_name}'] = safe_divide(tp_dist_from_entry, total_dist_to_level)
 
     return bronze_chunk
 
