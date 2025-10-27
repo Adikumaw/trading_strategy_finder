@@ -36,11 +36,11 @@ MAX_CPU_USAGE = max(1, cpu_count() - 2)
 
 # The number of discovered winning trades to accumulate in memory before
 # flushing them to the output CSV file. This is a key memory-saving feature.
-OUTPUT_CHUNK_SIZE = 1_000_000
+OUTPUT_CHUNK_SIZE = 500_000
 
 # The number of candles from the input file to process in each batch passed
 # to the Numba JIT-compiled function. This is a performance tuning parameter.
-INPUT_CHUNK_SIZE = 7000
+INPUT_CHUNK_SIZE = 10000
 
 # --- SPREAD CONFIGURATION (in Pips) ---
 
