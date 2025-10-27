@@ -166,14 +166,19 @@ def process_file_in_parallel(file_path_tuple):
 
 if __name__ == "__main__":
     """
-    Main execution block.
-    
-    This script can be run in two modes:
-    1. Discovery Mode (no arguments): Scans for all new silver files and processes them.
-       Example: `python scripts/gold_data_generator.py`
-       
-    2. Targeted Mode (one argument): Processes only the single file specified.
-       Example: `python scripts/gold_data_generator.py XAUUSD15.csv`
+    Main execution block for the Gold Layer.
+
+    Supports two operational modes for maximum flexibility:
+
+    1. Targeted Mode (for automation):
+       Processes a single file specified via a command-line argument.
+       - Usage: `python scripts/gold_data_generator.py XAUUSD15.csv`
+
+    2. Interactive Mode (for manual runs):
+       If run without arguments, the script scans for all unprocessed Silver feature
+       files and presents an interactive menu. The user can select one or more
+       files to process. Selected files are processed sequentially.
+       - Usage: `python scripts/gold_data_generator.py`
     """
     # --- Define Project Directory Structure ---
     core_dir = os.path.dirname(os.path.abspath(__file__))
@@ -181,7 +186,7 @@ if __name__ == "__main__":
     gold_features_dir = os.path.abspath(os.path.join(core_dir, '..', 'gold_data', 'features'))
     os.makedirs(gold_features_dir, exist_ok=True)
 
-    # --- NEW: DUAL-MODE FILE DISCOVERY LOGIC ---
+    files_to_process = []
     target_file_arg = sys.argv[1] if len(sys.argv) > 1 else None
 
     if target_file_arg:
@@ -189,55 +194,53 @@ if __name__ == "__main__":
         print(f"[TARGET] Targeted Mode: Processing single file '{target_file_arg}'")
         silver_path_check = os.path.join(silver_features_dir, target_file_arg)
         if not os.path.exists(silver_path_check):
-            print(f"[ERROR] Error: Target file not found in silver_data/features directory: {target_file_arg}")
-            files_to_process = []
+            print(f"[ERROR] Target file not found in silver_data/features directory: {target_file_arg}")
         else:
             files_to_process = [target_file_arg]
     else:
-        # --- Discovery Mode (Default) ---
-        print("[SCAN] Discovery Mode: Scanning for all new files...")
+        # --- Interactive Mode ---
+        print("[SCAN] Interactive Mode: Scanning for all new files...")
         try:
-            # Find all available silver files
-            all_files = [f for f in os.listdir(silver_features_dir) if f.endswith('.csv')]
-            # Check which files already have a corresponding Gold output to make the script resumable.
-            files_to_process = [f for f in all_files if not os.path.exists(os.path.join(gold_features_dir, f))]
+            all_silver_files = sorted([f for f in os.listdir(silver_features_dir) if f.endswith('.csv')])
+            new_files = [f for f in all_silver_files if not os.path.exists(os.path.join(gold_features_dir, f))]
+            
+            if not new_files:
+                print("[INFO] No new Silver feature files to process.")
+            else:
+                print("\n--- Select File(s) to Process ---")
+                for i, f in enumerate(new_files):
+                    print(f"  [{i+1}] {f}")
+                print("\nYou can select multiple files by entering numbers separated by commas (e.g., 1,3,5)")
+                
+                user_input = input("Enter number(s) to process: ").strip()
+                if user_input:
+                    try:
+                        selected_indices = [int(i.strip()) - 1 for i in user_input.split(',')]
+                        valid_indices = sorted(list(set(idx for idx in selected_indices if 0 <= idx < len(new_files))))
+                        files_to_process = [new_files[idx] for idx in valid_indices]
+                    except ValueError:
+                        print("[ERROR] Invalid input. Please enter numbers separated by commas.")
+
         except FileNotFoundError:
-            print(f"[ERROR] Error: Directory not found: '{silver_features_dir}'.")
-            files_to_process = []
+            print(f"[ERROR] The directory '{silver_features_dir}' was not found.")
 
     if not files_to_process:
-        print("[INFO] No new files to process.")
+        print("[INFO] No files selected or found for processing.")
     else:
-        print(f"Found {len(files_to_process)} new silver feature file(s) to process.")
+        print(f"\n[INFO] Queued {len(files_to_process)} file(s) for processing: {files_to_process}")
         
-        # --- Configure Multiprocessing ---
-        # If in targeted mode or only one file, don't ask, just use multiprocessing logic.
-        if target_file_arg or len(files_to_process) == 1:
-            use_multiprocessing = True
-        else:
-            use_multiprocessing = input("Use multiprocessing? (y/n): ").strip().lower() == 'y'
-        
-        if use_multiprocessing:
-            num_processes = MAX_CPU_USAGE
-        else:
-            num_processes = 1
-        
-        # --- Prepare Processing Tasks ---
-        tasks = [(os.path.join(silver_features_dir, fname), os.path.join(gold_features_dir, fname)) for fname in files_to_process]
-        
-        # --- Execute Processing ---
-        effective_num_processes = min(num_processes, len(tasks))
-        print(f"\n[INFO] Starting processing with {effective_num_processes} worker(s)...")
-        
-        if effective_num_processes > 1:
-            with Pool(processes=effective_num_processes) as pool:
-                results = list(tqdm(pool.imap_unordered(process_file_in_parallel, tasks), total=len(tasks), desc="Processing Files"))
-        else:
-            results = [process_file_in_parallel(task) for task in tqdm(tasks, desc="Processing Files")]
-
-        # --- Display Summary ---
-        print("\n--- Processing Summary ---")
-        for res in results:
-            print(res)
+        # --- Main Execution Loop (Processes files serially) ---
+        # NOTE: This script does not use intra-file parallelism because the ML
+        # preprocessing is very fast and not easily chunkable like the Bronze simulation.
+        # The main benefit comes from parallelizing across multiple files, which we handle
+        # here by processing them one by one.
+        for filename in files_to_process:
+            print("\n" + "="*50 + f"\nProcessing {filename}...")
+            silver_path = os.path.join(silver_features_dir, filename)
+            gold_path = os.path.join(gold_features_dir, filename)
+            
+            # Since the task is fast, we call the worker function directly without a Pool.
+            result = process_file_in_parallel((silver_path, gold_path))
+            print(result)
 
     print("\n" + "="*50 + "\n[SUCCESS] All gold data generation complete.")
