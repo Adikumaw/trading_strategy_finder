@@ -1,4 +1,4 @@
-# gold_data_generator.py (Parallelized Version)
+# gold_data_generator.py (V2.1 - Serial Processing)
 
 """
 Gold Layer: The Machine Learning Preprocessor
@@ -11,47 +11,46 @@ standardized format that is perfectly optimized for machine learning algorithms.
 Its sole purpose is to "translate" market context into the mathematical
 language that ML models understand, performing several key transformations:
 - Relational Transformation: Converts absolute price levels into a normalized
-  distance from the current close price.
-- Categorical Encoding: Converts text-based features (e.g., 'session') into
-  binary (0/1) columns.
+  distance from the current close price, making features scale-invariant.
+- Categorical Encoding: Converts text-based features (e.g., 'session', 'regime')
+  into binary (0/1) columns via one-hot encoding.
 - Pattern Compression: Bins noisy candlestick pattern scores into a simple,
-  discrete scale.
+  discrete 5-point scale to reduce noise.
 - Standardization: Rescales all other numerical features to a common scale
-  (mean 0, std 1).
+  (mean 0, std 1) using StandardScaler.
 """
 
-import pandas as pd
-import numpy as np
-from sklearn.preprocessing import StandardScaler
+import gc
 import os
 import re
-from tqdm import tqdm
-import gc
-from multiprocessing import Pool, cpu_count
-import sys # <-- IMPORT SYS MODULE
+import sys
+import traceback
+from typing import List, Tuple
+
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
 
 # --- CONFIGURATION ---
+# This script does not use multiprocessing for file processing to maintain
+# consistency with the Bronze and Silver layers. It processes files serially.
 
-# Sets the maximum number of CPU cores to use for multiprocessing.
-# Leaves 2 cores free to ensure system responsiveness.
-MAX_CPU_USAGE = max(1, cpu_count() - 2)
 
 # --- CORE FUNCTIONS ---
 
-def downcast_dtypes(df):
+def downcast_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Optimizes a DataFrame's memory usage by converting numeric columns to smaller dtypes.
+    Optimizes a DataFrame's memory usage by downcasting numeric types.
 
-    It iterates through all float64 and int64 columns and casts them to
-    float32 and int32, respectively. This can significantly reduce the memory
-    footprint of large DataFrames without a meaningful loss of precision for
-    most financial data.
+    Iterates through float64 and int64 columns, converting them to float32
+    and int32 respectively. This can significantly reduce memory footprint
+    with negligible loss of precision for most financial data.
 
     Args:
-        df (pd.DataFrame): The input DataFrame to optimize.
+        df: The input DataFrame to optimize.
 
     Returns:
-        pd.DataFrame: The DataFrame with downcasted numeric data types.
+        The DataFrame with downcasted numeric data types.
     """
     for col in df.select_dtypes(include=['float64']).columns:
         df[col] = df[col].astype('float32')
@@ -59,126 +58,125 @@ def downcast_dtypes(df):
         df[col] = df[col].astype('int32')
     return df
 
-def create_gold_features(features_df):
+
+def create_gold_features(features_df: pd.DataFrame) -> pd.DataFrame:
     """
     Transforms a Silver-layer DataFrame into a Gold-layer, ML-ready dataset.
 
-    This function orchestrates the entire machine learning preprocessing pipeline.
-    It takes the human-readable, feature-rich Silver dataset and applies a series
-    of transformations to make it suitable for ML models. These steps include
-    converting absolute price levels to a normalized distance from the close,
-    one-hot encoding categorical variables, compressing candlestick pattern
-    scores into a discrete scale, and standardizing all remaining numeric
-    features to have a mean of zero and a standard deviation of one.
+    This function orchestrates the entire ML preprocessing pipeline. It applies
+    a series of transformations to make the Silver dataset suitable for ML
+    models, ensuring all data is numerical, normalized, and standardized.
 
     Args:
-        features_df (pd.DataFrame): The human-readable features dataset from
-                                    the Silver layer, containing a 'time' column
-                                    and various market features.
+        features_df: The human-readable features dataset from the Silver layer.
 
     Returns:
-        pd.DataFrame: A fully transformed, purely numerical, and standardized
-                      DataFrame ready for machine learning tasks.
+        A fully transformed, purely numerical, and standardized DataFrame
+        ready for machine learning tasks.
     """
     df = features_df.copy()
 
     # --- 1. Relational Transformation: Convert absolute prices to relative distance ---
-    # Define regex patterns to identify all columns that represent an absolute price level.
-    abs_price_patterns = [
-        r'^(open|high|low|close)$', r'^SMA_\d+$', r'^EMA_\d+$',
-        r'^BB_(upper|lower)$', r'^(support|resistance)$', r'^ATR_level_.+$'
-    ]
-    abs_price_cols = [col for col in df.columns for pattern in abs_price_patterns if re.match(pattern, col)]
+    # This crucial step makes features scale-invariant. Instead of using an
+    # absolute price like SMA_50 = 1.1234, we store how far it is from the
+    # current close (e.g., 0.005 or 0.5%).
+    abs_price_patterns = re.compile(
+        r'^(open|high|low|close)$|'
+        r'^(SMA|EMA)_\d+$|'
+        r'^BB_(upper|lower)_\d+$|'
+        r'^(support|resistance)$|'
+        r'^ATR_level_.+_\d+$'
+    )
+    abs_price_cols = [col for col in df.columns if abs_price_patterns.match(col)]
     
-    # For each price column, calculate its normalized distance from that candle's close price.
-    # This makes the feature scale-invariant and timeless.
     if 'close' in df.columns:
         close_series = df['close']
         for col in abs_price_cols:
             if col != 'close':
-                df[f'{col}_dist_norm'] = (close_series - df[col]) / close_series.replace(0, np.nan)
+                df[f'{col}_dist_norm'] = (df[col] - close_series) / close_series.replace(0, np.nan)
     
-    # Drop the original absolute price columns and the volume column.
     df.drop(columns=list(set(abs_price_cols) | {'volume'}), inplace=True, errors='ignore')
 
     # --- 2. Categorical Encoding: Convert text columns to binary features ---
-    categorical_cols = ['session', 'trend_regime', 'vol_regime']
-    # `get_dummies` performs one-hot encoding. `drop_first=True` avoids multicollinearity.
-    df = pd.get_dummies(df, columns=[c for c in categorical_cols if c in df.columns], drop_first=True)
+    # One-hot encoding transforms categorical text data (e.g., 'session_London')
+    # into a binary (0/1) format that models can interpret.
+    categorical_cols = [
+        col for col in df.columns
+        if col.startswith(('session', 'trend_regime', 'vol_regime'))
+    ]
+    df = pd.get_dummies(df, columns=categorical_cols, drop_first=True)
 
     # --- 3. Pattern Compression: Bin candlestick pattern scores ---
+    # TA-Lib's scores (-100 to 100) can be noisy. Compressing them into a
+    # 5-point scale helps the model focus on the signal (strong/weak pattern)
+    # rather than the noise.
     candle_cols = [col for col in df.columns if col.startswith("CDL")]
-    def compress_pattern(v):
-        """Converts TA-Lib scores (-100 to 100) to a 5-point scale."""
+    def compress_pattern(v: float) -> float:
         if v >= 80: return 1.0     # Strong Bullish
-        elif v > 0: return 0.5     # Weak Bullish
-        elif v <= -80: return -1.0 # Strong Bearish
-        elif v < 0: return -0.5    # Weak Bearish
-        else: return 0.0           # Neutral / No Pattern
+        if v > 0: return 0.5     # Weak Bullish
+        if v <= -80: return -1.0    # Strong Bearish
+        if v < 0: return -0.5    # Weak Bearish
+        return 0.0               # Neutral
+    
     for col in candle_cols:
         df[col] = df[col].fillna(0).apply(compress_pattern)
 
     # --- 4. Standardization: Scale all remaining numerical features ---
-    # Identify all columns that should NOT be scaled (time, patterns, one-hot encoded).
-    one_hot_cols = [col for col in df.columns if any(s in col for s in ['session_', 'trend_regime_', 'vol_regime_'])]
+    # StandardScaler transforms features to have a mean of 0 and a standard
+    # deviation of 1, preventing features with larger scales from unfairly
+    # dominating the learning process.
+    # Dynamically find one-hot encoded columns to exclude them from scaling.
+    one_hot_cols = [
+        col for col in df.columns
+        if any(cat_col in col for cat_col in [c + '_' for c in categorical_cols])
+    ]
     non_scalable_cols = set(candle_cols + one_hot_cols + ['time'])
     
-    # Identify the columns that need to be scaled to have a mean of 0 and std dev of 1.
     numeric_columns_to_scale = [
-        col for col in df.columns if col not in non_scalable_cols and
-        df[col].dtype in ['float64', 'float32', 'int64', 'int32']
+        col for col in df.columns
+        if col not in non_scalable_cols and pd.api.types.is_numeric_dtype(df[col])
     ]
     
-    # Apply StandardScaler.
-    scaler = StandardScaler()
-    df[numeric_columns_to_scale] = scaler.fit_transform(df[numeric_columns_to_scale].fillna(0))
+    if numeric_columns_to_scale:
+        scaler = StandardScaler()
+        df[numeric_columns_to_scale] = scaler.fit_transform(
+            df[numeric_columns_to_scale].fillna(0)
+        )
     
     # --- 5. Final Cleanup ---
     return downcast_dtypes(df)
 
-def process_file_in_parallel(file_path_tuple):
-    """
-    A worker function to process a single file for parallel execution.
 
-    This function acts as a self-contained wrapper for the entire workflow of
-    processing one file. It reads a Silver features CSV, passes it to the
-    `create_gold_features` function for transformation, and saves the resulting
-    ML-ready DataFrame to the specified output path. It is designed to be
-    called by a multiprocessing `Pool`.
+def process_and_save_file(paths_tuple: Tuple[str, str]) -> str:
+    """
+    A self-contained function to process a single file.
+
+    It reads a Silver features CSV, transforms it into an ML-ready Gold
+    dataset using `create_gold_features`, and saves the result.
 
     Args:
-        file_path_tuple (tuple): A tuple containing two string elements:
-                                 (input_silver_path, output_gold_path).
+        paths_tuple: A tuple containing (input_silver_path, output_gold_path).
 
     Returns:
-        str: A status message indicating the success or failure of the operation,
-             suitable for logging.
+        A status message indicating the success or failure of the operation.
     """
-    silver_path, gold_path = file_path_tuple
+    silver_path, gold_path = paths_tuple
     fname = os.path.basename(silver_path)
     try:
         features_df = pd.read_csv(silver_path, parse_dates=['time'])
         gold_dataset = create_gold_features(features_df)
         gold_dataset.to_csv(gold_path, index=False)
-        return f"[SUCCESS] Success! Gold data generated for {fname}."
+        return f"[SUCCESS] Gold data generated for {fname}."
     except Exception as e:
-        return f"[ERROR] FAILED to process {fname}. Error: {e}"
+        print(f"An error occurred while processing {fname}: {e}")
+        traceback.print_exc()
+        return f"[ERROR] FAILED to process {fname}."
 
-if __name__ == "__main__":
+
+def main() -> None:
     """
-    Main execution block for the Gold Layer.
-
-    Supports two operational modes for maximum flexibility:
-
-    1. Targeted Mode (for automation):
-       Processes a single file specified via a command-line argument.
-       - Usage: `python scripts/gold_data_generator.py XAUUSD15.csv`
-
-    2. Interactive Mode (for manual runs):
-       If run without arguments, the script scans for all unprocessed Silver feature
-       files and presents an interactive menu. The user can select one or more
-       files to process. Selected files are processed sequentially.
-       - Usage: `python scripts/gold_data_generator.py`
+    Main execution function: handles file discovery, user interaction,
+    and orchestrates the serial processing of each file.
     """
     # --- Define Project Directory Structure ---
     core_dir = os.path.dirname(os.path.abspath(__file__))
@@ -190,19 +188,20 @@ if __name__ == "__main__":
     target_file_arg = sys.argv[1] if len(sys.argv) > 1 else None
 
     if target_file_arg:
-        # --- Targeted Mode ---
-        print(f"[TARGET] Targeted Mode: Processing single file '{target_file_arg}'")
+        # --- Targeted Mode (for automation) ---
+        print(f"[TARGET] Targeted Mode: Processing '{target_file_arg}'")
         silver_path_check = os.path.join(silver_features_dir, target_file_arg)
         if not os.path.exists(silver_path_check):
-            print(f"[ERROR] Target file not found in silver_data/features directory: {target_file_arg}")
+            print(f"[ERROR] Target file not found: {silver_path_check}")
         else:
             files_to_process = [target_file_arg]
     else:
-        # --- Interactive Mode ---
-        print("[SCAN] Interactive Mode: Scanning for all new files...")
+        # --- Interactive Mode (for manual runs) ---
+        print("[SCAN] Interactive Mode: Scanning for new files...")
         try:
-            all_silver_files = sorted([f for f in os.listdir(silver_features_dir) if f.endswith('.csv')])
-            new_files = [f for f in all_silver_files if not os.path.exists(os.path.join(gold_features_dir, f))]
+            silver_files = sorted([f for f in os.listdir(silver_features_dir) if f.endswith('.csv')])
+            gold_files = os.listdir(gold_features_dir)
+            new_files = [f for f in silver_files if f not in gold_files]
             
             if not new_files:
                 print("[INFO] No new Silver feature files to process.")
@@ -210,37 +209,37 @@ if __name__ == "__main__":
                 print("\n--- Select File(s) to Process ---")
                 for i, f in enumerate(new_files):
                     print(f"  [{i+1}] {f}")
-                print("\nYou can select multiple files by entering numbers separated by commas (e.g., 1,3,5)")
-                
+                print("\nSelect multiple files with comma-separated numbers (e.g., 1,3,5)")
                 user_input = input("Enter number(s) to process: ").strip()
                 if user_input:
                     try:
-                        selected_indices = [int(i.strip()) - 1 for i in user_input.split(',')]
-                        valid_indices = sorted(list(set(idx for idx in selected_indices if 0 <= idx < len(new_files))))
-                        files_to_process = [new_files[idx] for idx in valid_indices]
+                        indices = [int(i.strip()) - 1 for i in user_input.split(',')]
+                        files_to_process = [new_files[idx] for idx in sorted(set(indices)) if 0 <= idx < len(new_files)]
                     except ValueError:
-                        print("[ERROR] Invalid input. Please enter numbers separated by commas.")
-
+                        print("[ERROR] Invalid input. Please enter numbers only.")
         except FileNotFoundError:
-            print(f"[ERROR] The directory '{silver_features_dir}' was not found.")
+            print(f"[ERROR] The Silver features directory was not found at: {silver_features_dir}")
 
     if not files_to_process:
         print("[INFO] No files selected or found for processing.")
-    else:
-        print(f"\n[INFO] Queued {len(files_to_process)} file(s) for processing: {files_to_process}")
-        
-        # --- Main Execution Loop (Processes files serially) ---
-        # NOTE: This script does not use intra-file parallelism because the ML
-        # preprocessing is very fast and not easily chunkable like the Bronze simulation.
-        # The main benefit comes from parallelizing across multiple files, which we handle
-        # here by processing them one by one.
-        for filename in files_to_process:
-            print("\n" + "="*50 + f"\nProcessing {filename}...")
-            silver_path = os.path.join(silver_features_dir, filename)
-            gold_path = os.path.join(gold_features_dir, filename)
-            
-            # Since the task is fast, we call the worker function directly without a Pool.
-            result = process_file_in_parallel((silver_path, gold_path))
-            print(result)
+        return
 
-    print("\n" + "="*50 + "\n[SUCCESS] All gold data generation complete.")
+    print(f"\n[QUEUE] Queued {len(files_to_process)} file(s) for serial processing.")
+    
+    # --- Serial Execution Loop ---
+    # The script processes files one by one to maintain architectural consistency
+    # with the Bronze and Silver layers.
+    for filename in files_to_process:
+        print("\n" + "="*50 + f"\nProcessing {filename}...")
+        silver_path = os.path.join(silver_features_dir, filename)
+        gold_path = os.path.join(gold_features_dir, filename)
+        
+        # Call the processing function directly for each file.
+        result = process_and_save_file((silver_path, gold_path))
+        print(result)
+
+    print("\n" + "="*50 + "\n[COMPLETE] All Gold Layer data generation tasks are finished.")
+
+
+if __name__ == "__main__":
+    main()
