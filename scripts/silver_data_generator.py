@@ -477,8 +477,8 @@ def add_positioning_features(
         total_dist_to_level = level_price - candle_close_price
         sl_dist_from_entry = sl_prices - candle_close_price
         tp_dist_from_entry = tp_prices - candle_close_price
-        bronze_chunk[f'sl_place_pct_{level_name}'] = safe_divide(sl_dist_from_entry, total_dist_to_level)
-        bronze_chunk[f'tp_place_pct_{level_name}'] = safe_divide(tp_dist_from_entry, total_dist_to_level)
+        bronze_chunk[f'sl_place_pct_to_{level_name}'] = safe_divide(sl_dist_from_entry, total_dist_to_level)
+        bronze_chunk[f'tp_place_pct_to_{level_name}'] = safe_divide(tp_dist_from_entry, total_dist_to_level)
 
     return bronze_chunk
 
