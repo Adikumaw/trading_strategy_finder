@@ -203,13 +203,13 @@ def generate_strategy_definitions_parallel(chunked_outcomes_dir: str) -> pd.Data
     # Convert the sets of discovered blueprints into a structured DataFrame.
     definitions = []
     for level, sl_bin, tp_ratio in master_sl_pct:
-        definitions.append({'type': 'SL-Pct', 'sl_def': level, 'sl_bin': sl_bin, 'tp_def': tp_ratio, 'tp_bin': np.nan})
+        definitions.append({'type': 'SL-Pct', 'sl_def': level, 'sl_bin': sl_bin, 'tp_def': 'ratio', 'tp_bin': tp_ratio})
     for level, tp_bin, sl_ratio in master_tp_pct:
-        definitions.append({'type': 'TP-Pct', 'sl_def': sl_ratio, 'sl_bin': np.nan, 'tp_def': level, 'tp_bin': tp_bin})
+        definitions.append({'type': 'TP-Pct', 'sl_def': 'ratio', 'sl_bin': sl_ratio, 'tp_def': level, 'tp_bin': tp_bin})
     for level, sl_bin, tp_ratio in master_sl_bps:
-        definitions.append({'type': 'SL-BPS', 'sl_def': level, 'sl_bin': sl_bin, 'tp_def': tp_ratio, 'tp_bin': np.nan})
+        definitions.append({'type': 'SL-BPS', 'sl_def': level, 'sl_bin': sl_bin, 'tp_def': 'ratio', 'tp_bin': tp_ratio})
     for level, tp_bin, sl_ratio in master_tp_bps:
-        definitions.append({'type': 'TP-BPS', 'sl_def': sl_ratio, 'sl_bin': np.nan, 'tp_def': level, 'tp_bin': tp_bin})
+        definitions.append({'type': 'TP-BPS', 'sl_def': 'ratio', 'sl_bin': sl_ratio, 'tp_def': level, 'tp_bin': tp_bin})
 
     if not definitions:
         print("\n[INFO] No valid combinations were found.")
