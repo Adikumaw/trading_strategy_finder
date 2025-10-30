@@ -181,22 +181,25 @@ def consolidate_shard_file(shard_path: str, final_dir: str) -> int:
     Returns:
         The number of unique keys consolidated from this shard.
     """
+    candle_counts = {}
     try:
         df = pd.read_csv(shard_path)
-        if df.empty:
-            os.remove(shard_path)
-            return 0
-        # This is the final "reduce" step for each key within the shard.
-        for key, group in df.groupby('key'):
-            final_df = group.groupby('entry_time')['trade_count'].sum().reset_index()
-            final_target_path = os.path.join(final_dir, f"{key}.csv")
-            final_df.to_csv(final_target_path, index=False)
-        os.remove(shard_path) # Clean up the shard file after processing.
-        return df['key'].nunique()
+        if not df.empty:
+            for key, group in df.groupby('key'):
+                final_df = group.groupby('entry_time')['trade_count'].sum().reset_index()
+                # --- MODIFIED: Calculate the number of unique candles ---
+                num_candles = len(final_df)
+                candle_counts[key] = num_candles
+                
+                final_target_path = os.path.join(final_dir, f"{key}.csv")
+                final_df.to_csv(final_target_path, index=False)
+        
+        os.remove(shard_path)
     except Exception:
         print(f"[CONSOLIDATOR WARNING] Failed to consolidate shard {os.path.basename(shard_path)}.")
         traceback.print_exc()
-        return 0
+        
+    return candle_counts
 
 # --- MAIN ORCHESTRATOR ---
 def run_preprocessor_for_instrument(instrument_name: str, base_dirs: Dict[str, str]) -> None:
@@ -278,19 +281,26 @@ def run_preprocessor_for_instrument(instrument_name: str, base_dirs: Dict[str, s
     
     print(f"\nPhase 1 Complete. Discovered {len(master_blueprint_keys)} unique blueprints.")
 
-    definitions = [{'key': key, 'type': bp[0], 'sl_def': bp[1], 'sl_bin': bp[2], 'tp_def': bp[3], 'tp_bin': bp[4]} for bp, key in master_blueprint_keys.items()]
-    pd.DataFrame(definitions).to_csv(combinations_path, index=False)
-    print(f"Saved final combinations file to {combinations_path}")
 
     print("\n--- Phase 2: Consolidating Shard Files ---")
     shard_files = [os.path.join(temp_targets_dir, f) for f in os.listdir(temp_targets_dir) if f.startswith('_temp_shard_')]
+    master_candle_counts: Dict[str, int] = {}
     if not shard_files:
         print("[WARNING] No temporary shard files were generated. Skipping consolidation.")
     else:
         consolidation_func = partial(consolidate_shard_file, final_dir=final_targets_dir)
         with Pool(processes=MAX_CPU_USAGE) as pool:
-            list(tqdm(pool.imap_unordered(consolidation_func, shard_files), total=len(shard_files), desc="Phase 2: Consolidating Shards"))
+            # --- MODIFIED: Collect the results (dictionaries of candle counts) ---
+            for result_dict in tqdm(pool.imap_unordered(consolidation_func, shard_files), total=len(shard_files), desc="Phase 2: Consolidating Shards"):
+                master_candle_counts.update(result_dict)
         print("Phase 2 Complete. Final targets saved.")
+    
+    # --- MODIFIED: Add the new num_candles column before saving ---
+    definitions = [{'key': key, 'type': bp[0], 'sl_def': bp[1], 'sl_bin': bp[2], 'tp_def': bp[3], 'tp_bin': bp[4]} for bp, key in master_blueprint_keys.items()]
+    definitions_df = pd.DataFrame(definitions) # Create the DataFrame
+    definitions_df['num_candles'] = definitions_df['key'].map(master_candle_counts).fillna(0).astype(int)
+    definitions_df.to_csv(combinations_path, index=False)
+    print(f"Saved final combinations file to {combinations_path}")
     
     if os.path.exists(temp_targets_dir):
         shutil.rmtree(temp_targets_dir)
