@@ -1,30 +1,32 @@
-# platinum_preprocessor.py (V3.2 - Final Version)
+# platinum_preprocessor.py (V4.0 - Final Polish & Documentation)
 
 """
-Platinum Layer - Pre-Processor: The Unified Data Prepper
+Platinum Pre-Processor: Unified Blueprint Discovery & Target Extraction
 
-This single, high-performance script unifies the discovery of strategy
-blueprints and the pre-computation of their performance data. It uses a
-"Sharded Streaming" architecture for maximum performance and I/O efficiency,
-replacing the two previous Platinum stages.
+This high-performance script unifies the discovery of strategy "blueprints" and
+the pre-computation of their performance data (targets). It replaces the two
+previous Platinum stages (`combinations_generator` and `target_extractor`) with
+a single, more efficient Map-Reduce style architecture.
 
-Phase 1: Parallel Discovery and Sharded Streaming (The "Mapper")
-- It reads the enriched Silver data chunks in parallel. A worker (mapper)
-  discovers all unique blueprints within its assigned chunk and simultaneously
-  aggregates the trade counts for each one.
-- The main process collects these results into a large in-memory buffer.
-- Once the buffer reaches a size threshold, a "flush" operation is triggered.
-  The buffer is "sharded" based on the strategy key, and results are appended
-  in large, efficient batches to a small, fixed number of temporary shard files.
-- This solves the I/O bottleneck of writing to thousands of tiny files by
-  concentrating writes into a few larger files.
+Phase 1: Parallel Discovery (The "Mapper")
+- It reads the enriched Silver data Parquet chunks in parallel.
+- Each worker (mapper) discovers all unique strategy blueprints within its
+  assigned chunk and aggregates the trade counts for each blueprint per candle.
+- The results are streamed from all workers to a large in-memory buffer in the
+  main process.
 
-Phase 2: Parallel Consolidation of Shards (The "Reducer")
-- After all chunks have been streamed, a second parallel process is started.
-  Each worker is assigned one shard file.
-- The worker loads its shard, performs a final aggregation (groupby('key')),
-  and writes the final, clean target files. This is memory-safe as each
-  shard is a manageable size.
+Phase 2: Sharded Streaming (The "Shuffle")
+- When the buffer reaches a size threshold, a "flush" operation is triggered.
+- The buffer is "sharded" based on a hash of the strategy's unique key.
+- Results are appended in large, efficient batches to a small, fixed number of
+  temporary Parquet shard files. This solves the I/O bottleneck of writing to
+  thousands of tiny files by concentrating all writes.
+
+Phase 3: Parallel Consolidation (The "Reducer")
+- After all chunks have been processed, a final parallel process begins.
+- Each worker (reducer) is assigned one temporary shard file.
+- It loads its shard, performs a final aggregation (groupby('key')), and writes
+  the final, clean Parquet target files, one for each unique strategy.
 """
 
 import os
@@ -37,177 +39,167 @@ from multiprocessing import Pool, cpu_count, current_process
 from collections import defaultdict
 from typing import Dict, List, Tuple
 from functools import partial
+import time
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+try:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+except ImportError:
+    print("[FATAL] 'pyarrow' library not found. Please run 'pip install pyarrow'.")
+    sys.exit(1)
+
 # --- CONFIGURATION ---
 MAX_CPU_USAGE: int = max(1, cpu_count() - 2)
 BPS_BIN_SIZE: float = 5.0
-BUFFER_FLUSH_THRESHOLD: int = 2_000_000 # Number of records to hold in memory before flushing.
-NUM_SHARDS: int = 128 # The number of temporary files to shard results into.
+BUFFER_FLUSH_THRESHOLD: int = 2_000_000
+NUM_SHARDS: int = 128
+TEMP_SHARD_PREFIX = "_temp_shard_"
 
-# --- PICKLE-SAFE HELPER FUNCTION ---
+# --- PICKLE-SAFE HELPER ---
 def nested_dd():
     """A pickle-safe helper for creating nested defaultdicts."""
     return defaultdict(int)
 
+# --- REFACTORED PHASE 1 HELPERS ---
+
+def _apply_binning(chunk: pd.DataFrame, all_levels: List[str]) -> pd.DataFrame:
+    """Vectorized calculation of all binning features for a chunk."""
+    binned_cols = {}
+    for level in all_levels:
+        for sltp in ['sl', 'tp']:
+            pct_col = f"{sltp}_place_pct_to_{level}"
+            bps_col = f"{sltp}_dist_to_{level}_bps"
+            if pct_col in chunk.columns:
+                binned_cols[f'{pct_col}_bin'] = np.floor(chunk[pct_col] * 10)
+            if bps_col in chunk.columns:
+                binned_cols[f'{bps_col}_bin'] = np.floor(chunk[bps_col] / BPS_BIN_SIZE) * BPS_BIN_SIZE
+    return pd.DataFrame(binned_cols)
+
+def _aggregate_blueprints(agg_chunk: pd.DataFrame, all_levels: List[str]) -> Dict:
+    """Performs groupby operations to discover and count all blueprint occurrences WITHIN DEFINED RANGES."""
+    chunk_results = defaultdict(nested_dd)
+    for level in all_levels:
+        # --- SL-Pct ---
+        col = f'sl_place_pct_to_{level}_bin'
+        if col in agg_chunk.columns:
+            # Filter for rows where the SL placement is within a reasonable range (-200% to +200%).
+            df_filtered = agg_chunk[agg_chunk[col].between(-20, 20, inclusive='both')]
+            groups = df_filtered.dropna(subset=[col, 'tp_ratio']).groupby([col, 'tp_ratio', 'entry_time']).size()
+            for (sl_bin, tp_ratio, time), count in groups.items():
+                blueprint = ('SL-Pct', level, int(sl_bin), 'ratio', tp_ratio)
+                chunk_results[blueprint][time] += count
+
+        # --- TP-Pct ---
+        col = f'tp_place_pct_to_{level}_bin'
+        if col in agg_chunk.columns:
+            # Filter for rows where the TP placement is within a reasonable range (-200% to +200%).
+            df_filtered = agg_chunk[agg_chunk[col].between(-20, 20, inclusive='both')]
+            groups = df_filtered.dropna(subset=[col, 'sl_ratio']).groupby([col, 'sl_ratio', 'entry_time']).size()
+            for (tp_bin, sl_ratio, time), count in groups.items():
+                blueprint = ('TP-Pct', 'ratio', sl_ratio, level, int(tp_bin))
+                chunk_results[blueprint][time] += count
+
+        # --- SL-BPS ---
+        col = f'sl_dist_to_{level}_bps_bin'
+        if col in agg_chunk.columns:
+            # Filter for rows where the SL distance is within a reasonable range (-50 to +50 bps).
+            df_filtered = agg_chunk[agg_chunk[col].between(-50, 50, inclusive='both')]
+            groups = df_filtered.dropna(subset=[col, 'tp_ratio']).groupby([col, 'tp_ratio', 'entry_time']).size()
+            for (sl_bin, tp_ratio, time), count in groups.items():
+                blueprint = ('SL-BPS', level, sl_bin, 'ratio', tp_ratio)
+                chunk_results[blueprint][time] += count
+
+        # --- TP-BPS ---
+        col = f'tp_dist_to_{level}_bps_bin'
+        if col in agg_chunk.columns:
+            # Filter for rows where the TP distance is within a reasonable range (-50 to +50 bps).
+            df_filtered = agg_chunk[agg_chunk[col].between(-50, 50, inclusive='both')]
+            groups = df_filtered.dropna(subset=[col, 'sl_ratio']).groupby([col, 'sl_ratio', 'entry_time']).size()
+            for (tp_bin, sl_ratio, time), count in groups.items():
+                blueprint = ('TP-BPS', 'ratio', sl_ratio, level, tp_bin)
+                chunk_results[blueprint][time] += count
+                
+    return chunk_results
+
 # --- PHASE 1: WORKER FUNCTION (MAPPER) ---
 def discover_and_aggregate_chunk(task_tuple: Tuple[str, List[str]]) -> Dict:
-    """
-    Worker for Phase 1. Discovers blueprints and aggregates trade counts within a single chunk.
-
-    This function is highly optimized. It performs all binning calculations in
-    a vectorized manner and then uses a series of `groupby` operations to
-    discover and count all blueprint occurrences at once, avoiding slow
-    row-by-row iteration. It returns a dictionary containing either the
-    successful result or detailed error information.
-
-    Args:
-        task_tuple: A tuple containing the chunk path and a list of all market levels.
-
-    Returns:
-        A dictionary with 'status' and either 'result' or error details.
-    """
+    """Worker for Phase 1. Discovers blueprints and aggregates trade counts from one chunk."""
     chunk_path, all_levels = task_tuple
     try:
-        chunk_results: Dict[Tuple, Dict] = defaultdict(nested_dd)
-        chunk = pd.read_csv(chunk_path, parse_dates=['entry_time'])
+        # ### <<< CHANGE: Read Parquet instead of CSV.
+        chunk = pd.read_parquet(chunk_path)
         if chunk.empty:
             return {'status': 'success', 'result': {}}
         
         chunk['sl_ratio'] = chunk['sl_ratio'].round(5)
         chunk['tp_ratio'] = chunk['tp_ratio'].round(5)
         
-        # --- Corrected Vectorized Pre-Binning ---
-        # Create all binned columns in a separate dictionary first to avoid
-        # SettingWithCopyWarning and ensure data integrity.
-        binned_cols = {}
-        for level in all_levels:
-            for sltp in ['sl', 'tp']:
-                pct_col, bps_col = f"{sltp}_place_pct_to_{level}", f"{sltp}_dist_to_{level}_bps"
-                if pct_col in chunk.columns:
-                    binned_cols[f'{pct_col}_bin'] = np.floor(chunk[pct_col] * 10)
-                if bps_col in chunk.columns:
-                    binned_cols[f'{bps_col}_bin'] = np.floor(chunk[bps_col] / BPS_BIN_SIZE) * BPS_BIN_SIZE
-        
-        # Create a clean, new DataFrame with only the essential columns for aggregation.
-        binned_df = pd.DataFrame(binned_cols)
+        binned_df = _apply_binning(chunk, all_levels)
         agg_chunk = pd.concat([chunk[['entry_time', 'sl_ratio', 'tp_ratio']], binned_df], axis=1)
-
-        # --- Vectorized Discovery and Aggregation ---
-        for level in all_levels:
-            # --- SL-Pct ---
-            sl_pct_bin_col = f'sl_place_pct_to_{level}_bin'
-            if sl_pct_bin_col in agg_chunk.columns:
-                df_filtered = agg_chunk[agg_chunk[sl_pct_bin_col].between(-20, 20, inclusive='both')].dropna(subset=[sl_pct_bin_col, 'tp_ratio'])
-                groups = df_filtered.groupby([sl_pct_bin_col, 'tp_ratio', 'entry_time']).size()
-                for (sl_bin, tp_ratio, time), count in groups.items():
-                    blueprint = ('SL-Pct', level, int(sl_bin), 'ratio', tp_ratio)
-                    chunk_results[blueprint][time] += count
-
-            # --- TP-Pct, SL-BPS, TP-BPS logic follows the same pattern ---
-            tp_pct_bin_col = f'tp_place_pct_to_{level}_bin'
-            if tp_pct_bin_col in agg_chunk.columns:
-                df_filtered = agg_chunk[agg_chunk[tp_pct_bin_col].between(-20, 20, inclusive='both')].dropna(subset=[tp_pct_bin_col, 'sl_ratio'])
-                groups = df_filtered.groupby([tp_pct_bin_col, 'sl_ratio', 'entry_time']).size()
-                for (tp_bin, sl_ratio, time), count in groups.items():
-                    blueprint = ('TP-Pct', 'ratio', sl_ratio, level, int(tp_bin))
-                    chunk_results[blueprint][time] += count
-
-            sl_bps_bin_col = f'sl_dist_to_{level}_bps_bin'
-            if sl_bps_bin_col in agg_chunk.columns:
-                df_filtered = agg_chunk[agg_chunk[sl_bps_bin_col].between(-50, 50, inclusive='both')].dropna(subset=[sl_bps_bin_col, 'tp_ratio'])
-                groups = df_filtered.groupby([sl_bps_bin_col, 'tp_ratio', 'entry_time']).size()
-                for (sl_bin, tp_ratio, time), count in groups.items():
-                    blueprint = ('SL-BPS', level, sl_bin, 'ratio', tp_ratio)
-                    chunk_results[blueprint][time] += count
-
-            tp_bps_bin_col = f'tp_dist_to_{level}_bps_bin'
-            if tp_bps_bin_col in agg_chunk.columns:
-                df_filtered = agg_chunk[agg_chunk[tp_bps_bin_col].between(-50, 50, inclusive='both')].dropna(subset=[tp_bps_bin_col, 'sl_ratio'])
-                groups = df_filtered.groupby([tp_bps_bin_col, 'sl_ratio', 'entry_time']).size()
-                for (tp_bin, sl_ratio, time), count in groups.items():
-                    blueprint = ('TP-BPS', 'ratio', sl_ratio, level, tp_bin)
-                    chunk_results[blueprint][time] += count
-
+        
+        chunk_results = _aggregate_blueprints(agg_chunk, all_levels)
         return {'status': 'success', 'result': chunk_results}
 
     except Exception as e:
-        # Package error information cleanly to be handled by the main process.
-        return {
-            'status': 'error', 'worker': current_process().name,
-            'chunk': os.path.basename(chunk_path), 'error': str(e),
-            'traceback': traceback.format_exc()
-        }
+        return {'status': 'error', 'worker': current_process().name, 'chunk': os.path.basename(chunk_path),
+                'error': str(e), 'traceback': traceback.format_exc()}
 
-# --- SHARDED BUFFER FLUSHING FUNCTION ---
+# --- PHASE 2: SHARDED BUFFER FLUSHING ---
 def flush_buffer_to_shards(buffer: List[Tuple], temp_dir: str):
     """
-    Converts the in-memory buffer to a DataFrame and appends it to sharded files.
-
-    This function takes the large list of (key, time, count) tuples, converts it
-    to a DataFrame, assigns a `shard_id` to each row based on its key's hash,
-    and then appends each group to its corresponding shard file on disk.
-
-    Args:
-        buffer: The list of tuples to flush.
-        temp_dir: The directory for temporary shard files.
+    Converts the in-memory buffer to a DataFrame and appends it to sharded Parquet files.
     """
     if not buffer: return
+    
     df = pd.DataFrame(buffer, columns=['key', 'entry_time', 'trade_count'])
-    # Sharding logic: use a simple hash modulo to distribute keys across files.
-    df['shard_id'] = df['key'].apply(lambda x: hash(x) % NUM_SHARDS)
+    df['shard_id'] = df['key'].apply(lambda x: int(x, 16) % NUM_SHARDS)
+    
+    # Iterate through each shard group and write/append it to the correct file.
     for shard_id, group in df.groupby('shard_id'):
-        filepath = os.path.join(temp_dir, f"_temp_shard_{shard_id}.csv")
-        group[['key', 'entry_time', 'trade_count']].to_csv(
-            filepath, mode='a', header=not os.path.exists(filepath), index=False
-        )
+        filepath = os.path.join(temp_dir, f"{TEMP_SHARD_PREFIX}{shard_id}.parquet")
+        
+        # Prepare the new data to be written.
+        new_table = pa.Table.from_pandas(group[['key', 'entry_time', 'trade_count']], preserve_index=False)
+        
+        if os.path.exists(filepath):
+            # If the file exists, read the old data, combine it with the new, and overwrite.
+            existing_table = pq.read_table(filepath)
+            combined_table = pa.concat_tables([existing_table, new_table])
+            pq.write_table(combined_table, filepath)
+        else:
+            # If the file doesn't exist, just write the new data.
+            pq.write_table(new_table, filepath)
 
-# --- PHASE 2: WORKER FUNCTION (REDUCER) ---
-def consolidate_shard_file(shard_path: str, final_dir: str) -> int:
-    """
-    Worker for Phase 2. Consolidates one shard file into final target files.
-
-    It reads a single shard file, groups by each unique strategy key, performs a
-    final aggregation to sum trade counts per timestamp, and writes one clean
-    final file for each key.
-
-    Args:
-        shard_path: The path to the temporary shard file.
-        final_dir: The root directory for the final target files.
-
-    Returns:
-        The number of unique keys consolidated from this shard.
-    """
+# --- PHASE 3: WORKER FUNCTION (REDUCER) ---
+def consolidate_shard_file(task_tuple: Tuple[str, str]) -> Dict[str, int]:
+    """Worker for Phase 3. Consolidates one shard file into final target files."""
+    shard_path, final_dir = task_tuple
     candle_counts = {}
     try:
-        df = pd.read_csv(shard_path)
+        df = pd.read_parquet(shard_path)
         if not df.empty:
             for key, group in df.groupby('key'):
                 final_df = group.groupby('entry_time')['trade_count'].sum().reset_index()
-                # --- MODIFIED: Calculate the number of unique candles ---
-                num_candles = len(final_df)
-                candle_counts[key] = num_candles
+                candle_counts[key] = len(final_df)
                 
-                final_target_path = os.path.join(final_dir, f"{key}.csv")
-                final_df.to_csv(final_target_path, index=False)
-        
+                final_target_path = os.path.join(final_dir, f"{key}.parquet")
+                final_df.to_parquet(final_target_path, index=False)
         os.remove(shard_path)
     except Exception:
-        print(f"[CONSOLIDATOR WARNING] Failed to consolidate shard {os.path.basename(shard_path)}.")
+        print(f"[REDUCER WARNING] Failed to consolidate shard {os.path.basename(shard_path)}.")
         traceback.print_exc()
-        
     return candle_counts
 
 # --- MAIN ORCHESTRATOR ---
 def run_preprocessor_for_instrument(instrument_name: str, base_dirs: Dict[str, str]) -> None:
-    """
-    Orchestrates the entire unified discovery and extraction process for a single instrument.
-    """
+    """Orchestrates the entire Map-Reduce process for a single instrument."""
+    # Define paths
     chunked_outcomes_dir = os.path.join(base_dirs['silver'], instrument_name)
-    combinations_path = os.path.join(base_dirs['platinum_combo'], f"{instrument_name}.csv")
+    combinations_path = os.path.join(base_dirs['platinum_combo'], f"{instrument_name}.parquet")
     temp_targets_dir = os.path.join(base_dirs['platinum_temp'], instrument_name)
     final_targets_dir = os.path.join(base_dirs['platinum_final'], instrument_name)
     
@@ -220,146 +212,161 @@ def run_preprocessor_for_instrument(instrument_name: str, base_dirs: Dict[str, s
         os.makedirs(d)
 
     try:
-        chunk_files = [os.path.join(chunked_outcomes_dir, f) for f in os.listdir(chunked_outcomes_dir) if f.endswith('.csv')]
+        chunk_files = [os.path.join(chunked_outcomes_dir, f) for f in os.listdir(chunked_outcomes_dir) if f.endswith('.parquet')]
         if not chunk_files:
-            print(f"[ERROR] No chunk files found for {instrument_name}.")
+            print(f"[ERROR] No Silver chunk files found for {instrument_name}.")
             return
     except FileNotFoundError:
-        print(f"[ERROR] Chunks directory not found: {chunked_outcomes_dir}")
+        print(f"[ERROR] Silver chunks directory not found: {chunked_outcomes_dir}")
         return
 
-    header_df = pd.read_csv(chunk_files[0], nrows=0)
-    level_pattern = re.compile(r'(?:sl|tp)_(?:place_pct_to|dist_to)_([a-zA-Z0-9_]+)(?:_bps)?')
-    all_levels = sorted(list(set(match.group(1) for col in header_df.columns for match in [level_pattern.match(col)] if match)))
+    # ### <<< CRITICAL FIX: Correctly read the schema from the Parquet file.
+    try:
+        # Use pyarrow to open the file and get the column names from its schema.
+        pq_file = pq.ParquetFile(chunk_files[0])
+        column_names = pq_file.schema.names
+    except Exception as e:
+        print(f"[ERROR] Could not read schema from chunk file '{chunk_files[0]}': {e}")
+        return
+        
+    level_pattern = re.compile(r'(?:sl|tp)_(?:place_pct_to|dist_to)_([a-zA-Z0-9_]+)')
+    all_levels = sorted({match.group(1) for col in column_names for match in [level_pattern.match(col)] if match})
+    # ### End of fix
+
     print(f"Discovered {len(all_levels)} market levels for {instrument_name}.")
 
+    # --- Phase 1 & 2: Map & Shuffle ---
     print("\n--- Phase 1: Discovering Blueprints and Streaming to Shards ---")
     tasks = [(path, all_levels) for path in chunk_files]
-    master_blueprint_keys: Dict[Tuple, str] = {}
-    master_buffer: List[Tuple] = []
+    master_blueprint_keys = {}
+    master_buffer = []
 
-    # --- Robust Parallel Processing Loop ---
+    # This try-except block now correctly uses the discovered all_levels
     try:
         with Pool(processes=MAX_CPU_USAGE) as pool:
             with tqdm(total=len(tasks), desc="Phase 1: Processing Chunks") as pbar:
-                for result_dict in pool.imap_unordered(discover_and_aggregate_chunk, tasks):
-                    # Robust Error Handling: Immediately stop if any worker fails.
-                    if result_dict['status'] == 'error':
-                        print("\n" + "="*80)
-                        print(f"[FATAL WORKER ERROR] Worker '{result_dict['worker']}' failed on chunk '{result_dict['chunk']}'.")
-                        print(f"Error: {result_dict['error']}")
-                        print("--- Full Traceback from Worker ---")
-                        print(result_dict['traceback'])
-                        print("="*80 + "\nTerminating all processes.")
-                        pool.terminate() # Stop all other workers immediately.
-                        sys.exit(1) # Exit the script with an error code.
+                for result in pool.imap_unordered(discover_and_aggregate_chunk, tasks):
+                    if result['status'] == 'error':
+                        print(f"\n[FATAL WORKER ERROR] Worker '{result['worker']}' failed on chunk '{result['chunk']}'.")
+                        print(f"Error: {result['error']}\nTerminating all processes.")
+                        pool.terminate()
+                        sys.exit(1)
                     
-                    # Process successful results.
-                    for blueprint, counts in result_dict['result'].items():
+                    for blueprint, counts in result['result'].items():
                         if blueprint not in master_blueprint_keys:
-                            key_str = '-'.join([str(x) for x in blueprint])
-                            key = hashlib.sha256(key_str.encode()).hexdigest()[:16]
-                            master_blueprint_keys[blueprint] = key
+                            key_str = '-'.join(map(str, blueprint))
+                            master_blueprint_keys[blueprint] = hashlib.sha256(key_str.encode()).hexdigest()[:16]
                         key = master_blueprint_keys[blueprint]
                         for time, count in counts.items():
                             master_buffer.append((key, time, count))
                     
-                    # Flush buffer to disk when it reaches the threshold.
                     if len(master_buffer) >= BUFFER_FLUSH_THRESHOLD:
                         flush_buffer_to_shards(master_buffer, temp_targets_dir)
                         master_buffer.clear()
-                    
                     pbar.update(1)
-    except Exception as e:
+    except Exception:
         print("\n[FATAL ORCHESTRATOR ERROR] The main process encountered an exception.")
         traceback.print_exc()
         sys.exit(1)
 
-    # Final flush for any remaining items in the buffer.
     if master_buffer:
         flush_buffer_to_shards(master_buffer, temp_targets_dir)
-    
     print(f"\nPhase 1 Complete. Discovered {len(master_blueprint_keys)} unique blueprints.")
 
-
+    # --- Phase 3: Reduce ---
     print("\n--- Phase 2: Consolidating Shard Files ---")
-    shard_files = [os.path.join(temp_targets_dir, f) for f in os.listdir(temp_targets_dir) if f.startswith('_temp_shard_')]
-    master_candle_counts: Dict[str, int] = {}
+    shard_files = [os.path.join(temp_targets_dir, f) for f in os.listdir(temp_targets_dir) if f.startswith(TEMP_SHARD_PREFIX)]
+    master_candle_counts = {}
     if not shard_files:
         print("[WARNING] No temporary shard files were generated. Skipping consolidation.")
     else:
-        consolidation_func = partial(consolidate_shard_file, final_dir=final_targets_dir)
+        tasks = [(path, final_targets_dir) for path in shard_files]
         with Pool(processes=MAX_CPU_USAGE) as pool:
-            # --- MODIFIED: Collect the results (dictionaries of candle counts) ---
-            for result_dict in tqdm(pool.imap_unordered(consolidation_func, shard_files), total=len(shard_files), desc="Phase 2: Consolidating Shards"):
+            for result_dict in tqdm(pool.imap_unordered(consolidate_shard_file, tasks), total=len(tasks), desc="Phase 2: Consolidating Shards"):
                 master_candle_counts.update(result_dict)
-        print("Phase 2 Complete. Final targets saved.")
+    print("Phase 2 Complete. Final targets saved.")
     
-    # --- MODIFIED: Add the new num_candles column before saving ---
+    # Save the final combinations file
     definitions = [{'key': key, 'type': bp[0], 'sl_def': bp[1], 'sl_bin': bp[2], 'tp_def': bp[3], 'tp_bin': bp[4]} for bp, key in master_blueprint_keys.items()]
-    definitions_df = pd.DataFrame(definitions) # Create the DataFrame
+    definitions_df = pd.DataFrame(definitions)
     definitions_df['num_candles'] = definitions_df['key'].map(master_candle_counts).fillna(0).astype(int)
-    definitions_df.to_csv(combinations_path, index=False)
-    print(f"Saved final combinations file to {combinations_path}")
+    definitions_df.to_parquet(combinations_path, index=False)
+    print(f"Saved final combinations file to {os.path.basename(combinations_path)}")
     
     if os.path.exists(temp_targets_dir):
         shutil.rmtree(temp_targets_dir)
 
-def main() -> None:
-    # This main function is well-structured and requires no logical changes.
-    core_dir = os.path.dirname(os.path.abspath(__file__))
-    base_dirs = {
-        'silver': os.path.abspath(os.path.join(core_dir, '..', 'silver_data', 'chunked_outcomes')),
-        'platinum_combo': os.path.abspath(os.path.join(core_dir, '..', 'platinum_data', 'combinations')),
-        'platinum_temp': os.path.abspath(os.path.join(core_dir, '..', 'platinum_data', 'temp_targets')),
-        'platinum_final': os.path.abspath(os.path.join(core_dir, '..', 'platinum_data', 'targets'))
-    }
-    for d in base_dirs.values(): os.makedirs(d, exist_ok=True)
-    
-    instrument_folders_to_process = []
-    target_arg = sys.argv[1] if len(sys.argv) > 1 else None
-    
-    if target_arg:
-        instrument_name = target_arg.replace('.csv', '')
-        print(f"[TARGET] Targeted Mode: Processing instrument '{instrument_name}'")
-        if os.path.isdir(os.path.join(base_dirs['silver'], instrument_name)):
-            instrument_folders_to_process = [instrument_name]
-        else:
-            print(f"[ERROR] Silver chunk directory not found for: {instrument_name}")
-    else:
-        print("[SCAN] Interactive Mode: Scanning for new instrument folders...")
-        try:
-            all_folders = sorted([d for d in os.listdir(base_dirs['silver']) if os.path.isdir(os.path.join(base_dirs['silver'], d))])
-            new_folders = [f for f in all_folders if not os.path.exists(os.path.join(base_dirs['platinum_combo'], f"{f}.csv"))]
-            if not new_folders:
-                print("[INFO] No new instruments to process.")
-            else:
-                print("\n--- Select Instrument(s) to Process ---")
-                for i, f in enumerate(new_folders): print(f"  [{i+1}] {f}")
-                user_input = input("Enter number(s) to process: ").strip()
-                if user_input:
-                    try:
-                        indices = [int(i.strip()) - 1 for i in user_input.split(',')]
-                        instrument_folders_to_process = [new_folders[idx] for idx in sorted(set(indices)) if 0 <= idx < len(new_folders)]
-                    except ValueError:
-                        print("[ERROR] Invalid input.")
-        except FileNotFoundError:
-            print(f"[ERROR] Source directory not found: {base_dirs['silver']}")
-    
-    if not instrument_folders_to_process:
-        print("[INFO] No instruments selected for processing.")
-        return
-    
-    print(f"\n[QUEUE] Queued {len(instrument_folders_to_process)} instrument(s): {instrument_folders_to_process}")
-    for instrument_name in instrument_folders_to_process:
-        try:
-            print(f"\n{'='*50}\nProcessing Instrument: {instrument_name}\n{'='*50}")
-            run_preprocessor_for_instrument(instrument_name, base_dirs)
-        except Exception:
-            print(f"\n[FATAL ORCHESTRATOR ERROR] An unhandled exception occurred in main loop for {instrument_name}.")
-            traceback.print_exc()
+# ### <<< NEW FUNCTION: Standardized interactive menu.
+def _select_instruments_interactively(silver_dir: str, combo_dir: str) -> List[str]:
+    """Scans for new instrument folders and prompts the user for selection."""
+    print("[INFO] Interactive Mode: Scanning for new instruments...")
+    try:
+        all_instruments = sorted([d for d in os.listdir(silver_dir) if os.path.isdir(os.path.join(silver_dir, d))])
+        processed_bases = {os.path.splitext(f)[0] for f in os.listdir(combo_dir) if f.endswith('.parquet')}
+        new_instruments = [inst for inst in all_instruments if inst not in processed_bases]
 
-    print("\n" + "="*50 + "\n[COMPLETE] All Platinum preprocessing tasks are finished.")
+        if not new_instruments:
+            print("[INFO] No new instruments to process.")
+            return []
+
+        print("\n--- Select Instrument(s) to Process ---")
+        for i, f in enumerate(new_instruments): print(f"  [{i+1}] {f}")
+        print("  [a] Process All New Instruments")
+        print("\nEnter selection (e.g., 1,3 or a):")
+        
+        user_input = input("> ").strip().lower()
+        if not user_input: return []
+        if user_input == 'a': return new_instruments
+
+        selected = []
+        try:
+            indices = {int(i.strip()) - 1 for i in user_input.split(',')}
+            for idx in sorted(indices):
+                if 0 <= idx < len(new_instruments): selected.append(new_instruments[idx])
+                else: print(f"[WARN] Invalid selection '{idx + 1}' ignored.")
+            return selected
+        except ValueError:
+            print("[ERROR] Invalid input. Please enter numbers (e.g., 1,3) or 'a'.")
+            return []
+    except FileNotFoundError:
+        print(f"[ERROR] The Silver chunks directory was not found at: {silver_dir}")
+        return []
+
+def main() -> None:
+    """Main execution function."""
+    start_time = time.time()
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    base_dirs = {
+        'silver': os.path.abspath(os.path.join(SCRIPT_DIR, '..', 'silver_data', 'chunked_outcomes')),
+        'platinum_combo': os.path.abspath(os.path.join(SCRIPT_DIR, '..', 'platinum_data', 'combinations')),
+        'platinum_temp': os.path.abspath(os.path.join(SCRIPT_DIR, '..', 'platinum_data', 'temp_targets')),
+        'platinum_final': os.path.abspath(os.path.join(SCRIPT_DIR, '..', 'platinum_data', 'targets'))
+    }
+    for d in base_dirs.values(): os.makedirs(d, exist_ok=True, mode=0o777)
+
+    print("--- Platinum Pre-Processor: Unified Blueprint Discovery ---")
+
+    target_arg = sys.argv[1] if len(sys.argv) > 1 else None
+    if target_arg:
+        print(f"\n[INFO] Targeted Mode: Processing instrument '{target_arg}'")
+        if os.path.isdir(os.path.join(base_dirs['silver'], target_arg)):
+            instruments_to_process = [target_arg]
+        else:
+            print(f"[ERROR] Silver chunk directory not found for: {target_arg}")
+            instruments_to_process = []
+    else:
+        instruments_to_process = _select_instruments_interactively(base_dirs['silver'], base_dirs['platinum_combo'])
+    
+    if not instruments_to_process:
+        print("\n[INFO] No instruments selected for processing. Exiting.")
+    else:
+        print(f"\n[QUEUE] Queued {len(instruments_to_process)} instrument(s): {', '.join(instruments_to_process)}")
+        for instrument in instruments_to_process:
+            print(f"\n{'='*50}\nProcessing Instrument: {instrument}\n{'='*50}")
+            run_preprocessor_for_instrument(instrument, base_dirs)
+    
+    end_time = time.time()
+    print(f"\nPlatinum pre-processing finished. Total time: {end_time - start_time:.2f} seconds.")
 
 if __name__ == "__main__":
     main()

@@ -2,7 +2,7 @@
 strategy_finder_env/
 
 # Ignore bronze data files
-bronze_data/*.csv
+bronze_data/*
 
 # Ignore silver data files
 silver_data/*
@@ -25,4 +25,4 @@ diamond_data/*
 zircon_data/*
 
 # Ignore any csv under the main directory only
-/*.csv
+/*.parquet
