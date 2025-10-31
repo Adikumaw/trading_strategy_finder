@@ -362,27 +362,48 @@ def _get_level_columns(all_columns: List[str]) -> Tuple[List[str], List[str]]:
     return cols_for_numpy, levels_for_pos
 
 # --- MAIN ORCHESTRATOR ---
-def create_silver_data(bronze_path: str, raw_path: str, features_path: str, chunked_outcomes_dir: str) -> None:
-    """Orchestrates the entire Silver Layer generation process for a single instrument."""
+def create_silver_data(
+    raw_path: str,
+    features_path: str,
+    bronze_path: str = None,
+    chunked_outcomes_dir: str = None,
+    features_only: bool = False
+) -> None:
+    """
+    Orchestrates the Silver Layer generation process. Can run in two modes:
+    1. Full Mode: Generates features AND enriches Bronze data.
+    2. Features Only Mode: Only generates the Silver features file.
+    """
     instrument_name = os.path.splitext(os.path.basename(raw_path))[0]
     print(f"\n{'='*30}\nProcessing: {instrument_name}\n{'='*30}")
 
+    # --- Stage 1: Market Feature Generation (Always runs) ---
     print("STEP 1: Creating Silver Features dataset...")
     raw_df = robust_read_csv(raw_path)
     if len(raw_df) < INDICATOR_WARMUP_PERIOD + 100:
         print(f"[ERROR] Not enough data for indicator warmup ({len(raw_df)} rows). Skipping.")
         return
+        
     features_df = add_all_market_features(raw_df)
     del raw_df; gc.collect()
+    
     features_df = features_df.iloc[INDICATOR_WARMUP_PERIOD:].reset_index(drop=True)
     features_df = downcast_dtypes(features_df)
+    
     os.makedirs(os.path.dirname(features_path), exist_ok=True)
     features_df.to_csv(features_path, index=False)
     print(f"[SUCCESS] Silver Features saved to: {os.path.basename(features_path)}")
+    
+    # ### <<< CHANGE: Conditional exit for --features-only mode.
+    if features_only:
+        print("[INFO] Features-only mode complete.")
+        return # --- EXIT EARLY ---
 
+    # --- Stage 2 & 3: Trade Enrichment (Skipped in features-only mode) ---
     print("\nSTEP 2: Preparing for PARALLEL chunk enrichment...")
     if os.path.exists(chunked_outcomes_dir): shutil.rmtree(chunked_outcomes_dir)
     os.makedirs(chunked_outcomes_dir)
+    
     print("  - Creating feature lookup structures for fast processing...")
     cols_for_numpy, levels_for_pos = _get_level_columns(features_df.columns)
     lookup_df = features_df[['time'] + cols_for_numpy]
@@ -397,30 +418,25 @@ def create_silver_data(bronze_path: str, raw_path: str, features_path: str, chun
     except Exception as e:
         print(f"[ERROR] Could not read Bronze Parquet file at {bronze_path}: {e}")
         return
+        
     if num_rows <= 0:
         print("[INFO] Bronze file is empty. No trades to process.")
         return
 
-    # ### <<< FINAL FIX: We no longer pre-calculate the number of batches.
     print(f"Found {num_rows:,} trades. Processing in batches...")
-    
     manager = Manager()
     task_queue = manager.Queue(maxsize=MAX_CPU_USAGE * 2)
     pool_init_args = (feature_values_np, time_to_idx, col_to_idx, levels_for_pos, chunked_outcomes_dir)
 
     with Pool(processes=MAX_CPU_USAGE, initializer=init_worker, initargs=pool_init_args) as pool:
         worker_results = [pool.apply_async(queue_worker, (task_queue,)) for _ in range(MAX_CPU_USAGE)]
-        
         iterator = pq_file.iter_batches(batch_size=PARQUET_BATCH_SIZE)
         
-        # ### <<< FINAL FIX: Remove the `total` argument from tqdm.
-        # This lets tqdm handle iterators of unknown length gracefully.
         for i, batch in enumerate(tqdm(iterator, desc="Feeding Batches to Workers"), 1):
             chunk_df = batch.to_pandas()
             task_queue.put((chunk_df, i))
             
         for _ in range(MAX_CPU_USAGE): task_queue.put(None)
-
         total_trades_processed = sum(res.get() for res in worker_results)
 
     print(f"\n[SUCCESS] Enriched and chunked {total_trades_processed:,} trades.")
@@ -468,6 +484,7 @@ def _select_files_interactively(bronze_dir: str, silver_out_dir: str) -> List[st
         print(f"[ERROR] The Bronze data directory was not found at: {bronze_dir}")
         return []
 
+
 def main() -> None:
     """Main execution function: handles file discovery, user interaction, and orchestration."""
     start_time = time.time()
@@ -482,39 +499,66 @@ def main() -> None:
 
     print("--- Silver Layer: The Enrichment Engine (Parquet Edition) ---")
 
-    target_file_arg = sys.argv[1] if len(sys.argv) > 1 else None
-    if target_file_arg:
-        print(f"\n[INFO] Targeted Mode: Processing '{target_file_arg}'")
-        if not target_file_arg.endswith('.parquet'): target_file_arg += '.parquet'
-        files_to_process = [target_file_arg] if os.path.exists(os.path.join(BRONZE_DIR, target_file_arg)) else []
-        if not files_to_process: print(f"[ERROR] Target file not found in bronze_data: {target_file_arg}")
-    else:
-        files_to_process = _select_files_interactively(BRONZE_DIR, CHUNKED_OUTCOMES_DIR)
+    # ### <<< CHANGE: Check for the --features-only flag.
+    features_only_mode = '--features-only' in sys.argv
+    target_file_arg = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith('--') else None
+    
+    if features_only_mode:
+        print("[INFO] Running in FEATURES-ONLY mode.")
+        if not target_file_arg:
+            print("[ERROR] --features-only mode requires a target file argument (e.g., python silver...py EURUSD15.csv --features-only).")
+            return
+        
+        # In features-only mode, we are working from raw data files.
+        instrument_name = target_file_arg.replace('.csv', '')
+        raw_path = os.path.join(RAW_DIR, target_file_arg)
+        if not os.path.exists(raw_path):
+            print(f"[ERROR] Raw data file not found: {raw_path}")
+            return
+            
+        paths = {
+            "raw_path": raw_path,
+            "features_path": os.path.join(FEATURES_DIR, f"{instrument_name}.csv"),
+            "features_only": True
+        }
+        create_silver_data(**paths)
+        
+    else: # --- Normal Mode (Full pipeline) ---
+        if target_file_arg:
+            print(f"\n[INFO] Targeted Mode: Processing '{target_file_arg}'")
+            if not target_file_arg.endswith('.parquet'): target_file_arg += '.parquet'
+            files_to_process = [target_file_arg] if os.path.exists(os.path.join(BRONZE_DIR, target_file_arg)) else []
+            if not files_to_process: print(f"[ERROR] Target file not found in bronze_data: {target_file_arg}")
+        else:
+            files_to_process = _select_files_interactively(BRONZE_DIR, CHUNKED_OUTCOMES_DIR)
 
-    if not files_to_process:
-        print("\n[INFO] No files selected or found for processing. Exiting.")
-    else:
-        print(f"\n[QUEUE] Queued {len(files_to_process)} file(s): {', '.join(files_to_process)}")
-        for filename in files_to_process:
-            instrument_name = filename.replace('.parquet', '')
-            raw_filename = f"{instrument_name}.csv"
-            paths = {
-                "bronze_path": os.path.join(BRONZE_DIR, filename),
-                "raw_path": os.path.join(RAW_DIR, raw_filename),
-                "features_path": os.path.join(FEATURES_DIR, f"{instrument_name}.csv"),
-                "chunked_outcomes_dir": os.path.join(CHUNKED_OUTCOMES_DIR, instrument_name)
-            }
-            if not os.path.exists(paths["raw_path"]):
-                print(f"[WARN] SKIPPING {filename}: Corresponding raw_data file ('{raw_filename}') is missing.")
-                continue
-            try:
-                create_silver_data(**paths)
-            except Exception:
-                print(f"\n[FATAL ERROR] A critical error occurred while processing {filename}.")
-                traceback.print_exc()
+        if not files_to_process:
+            print("\n[INFO] No files selected or found for processing. Exiting.")
+        else:
+            print(f"\n[QUEUE] Queued {len(files_to_process)} file(s): {', '.join(files_to_process)}")
+            for filename in files_to_process:
+                instrument_name = filename.replace('.parquet', '')
+                raw_filename = f"{instrument_name}.csv"
+                paths = {
+                    "bronze_path": os.path.join(BRONZE_DIR, filename),
+                    "raw_path": os.path.join(RAW_DIR, raw_filename),
+                    "features_path": os.path.join(FEATURES_DIR, f"{instrument_name}.csv"),
+                    "chunked_outcomes_dir": os.path.join(CHUNKED_OUTCOMES_DIR, instrument_name),
+                    "features_only": False
+                }
+                if not os.path.exists(paths["raw_path"]):
+                    print(f"[WARN] SKIPPING {filename}: Corresponding raw_data file ('{raw_filename}') is missing.")
+                    continue
+                try:
+                    create_silver_data(**paths)
+                except Exception:
+                    print(f"\n[FATAL ERROR] A critical error occurred while processing {filename}.")
+                    traceback.print_exc()
 
     end_time = time.time()
     print(f"\nSilver Layer generation finished. Total time: {end_time - start_time:.2f} seconds.")
 
 if __name__ == "__main__":
+    # The helper functions being called are assumed to be defined above.
+    # We only show the main orchestrator function changes here.
     main()
