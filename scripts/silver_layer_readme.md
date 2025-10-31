@@ -4,12 +4,13 @@ This script is the central feature engineering hub of the Strategy Finder pipeli
 
 ## 🎯 Purpose in the Pipeline
 
-If the Bronze Layer answers "what trades _could have_ won?", the Silver Layer answers "**under what market conditions** did they win?". It operates in two major stages:
+If the Bronze Layer answers "what trades _could have_ won?", the Silver Layer answers "**under what market conditions** did they win?". It can operate in two modes:
 
-1.  **Market Feature Generation:** First, it creates a comprehensive "fingerprint" of the market for every moment in time by calculating over 200 technical indicators, candlestick patterns, and contextual features from the raw price data.
-2.  **Trade Enrichment:** Second, it merges this market context with every single trade from the Bronze Layer, calculating a powerful set of **relational positioning features** that describe where a trade's SL/TP levels were placed relative to key market structures (like moving averages, Bollinger Bands, etc.).
+1.  **Full Mode (Default):** Performs two major stages:
+    *   **Market Feature Generation:** Creates a comprehensive "fingerprint" of the market for every moment in time by calculating over 200 technical indicators, candlestick patterns, and contextual features from the raw price data.
+    *   **Trade Enrichment:** Merges this market context with every single trade from the Bronze Layer, calculating a powerful set of **relational positioning features**.
 
-The output of this layer is the most valuable dataset in the pipeline, forming the basis for all subsequent pattern discovery.
+2.  **Features-Only Mode:** Performs only the **Market Feature Generation** stage. This is a utility mode used by other scripts, like the `diamond_data_prepper`, that only need the market context without the trade enrichment.
 
 ---
 
@@ -30,27 +31,20 @@ The output of this layer is the most valuable dataset in the pipeline, forming t
 
 ## ⚙️ How It Works: The Logic
 
-The script processes one instrument at a time, completing both stages before moving to the next.
+The script processes one instrument at a time.
 
-**Stage 1: Market Feature Generation**
+**Stage 1: Market Feature Generation (Always Runs)**
 
 1.  **Load Raw Data:** The raw OHLC `.csv` file is loaded and validated.
 2.  **Calculate Feature Batches:** Features are calculated in logical groups (standard indicators, patterns, S/R, etc.) for code clarity.
 3.  **Concatenate & Save:** All feature groups are combined into a single master DataFrame. An `INDICATOR_WARMUP_PERIOD` is applied (the first N rows are dropped) to ensure all indicators have stable starting values.
 4.  **Save:** This master market context file is saved as a single `.csv` in `/silver_data/features/`.
 
-**Stage 2: Parallel Trade Enrichment**
+**Stage 2: Parallel Trade Enrichment (Full Mode Only)**
 
-1.  **Create Lookup Structures:** Before processing trades, the script pre-computes the market features into highly efficient lookup structures: a NumPy array for the raw data and a Pandas Series that maps every timestamp to its corresponding row index. This is the architectural key to the script's performance.
-2.  **Producer (Main Process):**
-    - The main process opens the large Bronze `.parquet` file.
-    - It uses `pyarrow.iter_batches` to read the trade data in efficient, memory-friendly chunks.
-    - Each chunk (now a Pandas DataFrame) is placed onto a shared queue for the workers.
-3.  **Consumers (Worker Processes):**
-    - Multiple worker processes run in parallel, each pulling a DataFrame chunk from the queue.
-    - For each trade in its chunk, the worker uses the fast lookup structures to instantly retrieve the full market context at the trade's `entry_time`.
-    - It then executes `add_positioning_features` to calculate all the relational metrics.
-    - The final, enriched DataFrame chunk is saved as a uniquely named `.parquet` file in `/silver_data/chunked_outcomes/{instrument_name}/`.
+1.  **Create Lookup Structures:** The script pre-computes the market features into highly efficient lookup structures: a NumPy array for the raw data and a Pandas Series that maps every timestamp to its corresponding row index.
+2.  **Producer (Main Process):** The main process opens the large Bronze `.parquet` file and uses `pyarrow.iter_batches` to read the trade data in efficient, memory-friendly chunks.
+3.  **Consumers (Worker Processes):** Multiple worker processes run in parallel, each pulling a chunk from a shared queue. They use the fast lookup structures to enrich the trades with relational features and save the output to chunked Parquet files.
 
 ---
 
@@ -81,9 +75,11 @@ Key parameters can be tuned directly in the global configuration section at the 
 
 Execute the script from the root directory of the project.
 
+### Full Mode
+
 **1. Interactive Mode (Recommended):**
 
-The script will scan for new `.parquet` files in `/bronze_data` and present a menu.
+The script will scan for new `.parquet` files in `/bronze_data` and present a menu for full processing.
 
 ```bash
 python scripts/silver_data_generator.py
@@ -97,21 +93,25 @@ To process a specific file from the `/bronze_data` directory, pass its name as a
 python scripts/silver_data_generator.py EURUSD15.parquet
 ```
 
+### Features-Only Mode
+
+**3. Features-Only Mode (For Automation):**
+
+This mode is designed to be called by other scripts. It skips the interactive menu and the trade enrichment stage, generating only the market features CSV file for a given raw data file.
+
+```bash
+# The target file must be a raw data file (e.g., from /raw_data/)
+python scripts/silver_data_generator.py EURUSD15.csv --features-only```
+
 ---
 
 ## 📄 Output
 
-This script produces two distinct sets of outputs in the `/silver_data/` directory:
+This script produces up to two distinct sets of outputs in the `/silver_data/` directory:
 
-**1. Market Features (`/features/{instrument}.csv`):**
-A single, large CSV file per instrument containing the full market context for every candlestick (after the warmup period).
+**1. Market Features (`/features/{instrument}.csv`):** (Generated in all modes)
+A single, large CSV file per instrument containing the full market context for every candlestick.
 
-**2. Enriched Trades (`/chunked_outcomes/{instrument}/chunk_*.parquet`):**
-A directory for each instrument containing multiple Parquet files. Each file is a chunk of the original Bronze data, now enriched with dozens of new relational positioning columns, such as:
-
-| New Column Example           | Description                                                                                                                                              |
-| :--------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sl_dist_to_SMA_50_bps`      | The distance from the Stop Loss to the 50-period SMA, measured in basis points.                                                                          |
-| `tp_dist_to_BB_upper_20_bps` | The distance from the Take Profit to the upper Bollinger Band, measured in basis points.                                                                 |
-| `sl_place_pct_to_support`    | Where the Stop Loss is placed on a scale from the entry price (0.0) to the last support level (1.0). A value of 0.5 means it was placed exactly halfway. |
-| `tp_place_pct_to_resistance` | Where the Take Profit is placed on a scale from the entry price (0.0) to the last resistance level (1.0).                                                |
+**2. Enriched Trades (`/chunked_outcomes/{instrument}/chunk_*.parquet`):** (Generated in Full Mode only)
+A directory for each instrument containing multiple Parquet files. Each file is a chunk of the original Bronze data, now enriched with dozens of new relational positioning columns.
+```
